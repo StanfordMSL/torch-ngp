@@ -11,6 +11,7 @@ from scipy.spatial.transform import Slerp, Rotation
 
 from nerf.utils import *
 
+LLFF_TO_BLENDER = np.array([[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 1, 0], [0,0,0,1]])
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
 def nerf_matrix_to_ngp(pose, scale=0.33):
@@ -26,7 +27,7 @@ def nerf_matrix_to_ngp(pose, scale=0.33):
 
 class NeRFDataset(Dataset):
     def __init__(self, path, type='train', mode='colmap', preload=False,
-                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0, rot_noise=0.0):
+                 downscale=1, scale=0.33, n_test=100, trans_noise=0.0, rot_noise=0.0):
         super().__init__()
         # path: the json file path.
 
@@ -45,7 +46,7 @@ class NeRFDataset(Dataset):
                 transform = json.load(f)
         elif mode == 'blender':
             # load all splits (train/valid/test), this is what instant-ngp in fact does...
-            if type == 'all':
+            if self.type == 'all':
                 transform_paths = glob.glob(os.path.join(path, '*.json'))
                 transform = None
                 for transform_path in transform_paths:
@@ -57,8 +58,66 @@ class NeRFDataset(Dataset):
                             transform['frames'].extend(tmp_transform['frames'])
             # only load one specified split
             else:
-                with open(os.path.join(path, f'transforms_{type}.json'), 'r') as f:
+                # with open(os.path.join(path, 'transforms_train.json'), 'r') as f:
+                with open(os.path.join(path, f'transforms_{self.type}.json'), 'r') as f:
                     transform = json.load(f)
+
+        elif mode == 'llff':
+            poses_arr = np.load(os.path.join(path, 'poses_bounds.npy'))
+            poses = poses_arr[:, :-2].reshape([-1, 3, 5])
+            bds = poses_arr[:, -2:]
+
+            # Setup transform dict.
+            transform = {}
+            transform['frames'] = []
+            transform['aabb_scale'] = 16
+
+            # Load all images in directory.
+            images = [os.path.join('images', f)
+                      for f in sorted(os.listdir(os.path.join(path, 'images'))) \
+                      if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+
+            # If no split file exists, create one.
+            if not os.path.exists(os.path.join(path, 'splits.npy')):
+                num_images = len(images)
+
+                # Create 80%/10%/10% train/val/test split.
+                num_train = int(0.8*num_images)
+                num_val = int(0.1 * num_images)
+                num_test = num_images - num_train - num_val
+
+                # Create data range and shuffle indices.
+                img_range = np.arange(num_images)
+                # np.random.shuffle(img_range)
+
+                splits = {'train': img_range[:num_train],
+                          'val': img_range[num_train:(num_train+num_val)],
+                          'test': img_range[(num_train+num_val):]}
+
+                np.save(os.path.join(path, 'splits.npy'), splits)
+
+            else:
+                splits = np.load(os.path.join(path, 'splits.npy'),
+                                 allow_pickle=True).item()
+
+            if self.type == 'all':
+                inds = (splits['train'].tolist() + splits['val'].tolist()
+                        + splits['test'].tolist())
+            else:
+                inds = splits[self.type]
+
+            # Add camera intrinsics to transforms.
+            H, W, f = poses[0, :, -1]
+            transform['fl_x'] = transform['fl_y'] = f
+
+            # For each frame:
+            for ii in inds:
+                # Add file path, transform matrix.
+                frame = {}
+                frame['file_path'] = images[ii]
+                frame['transform_matrix'] = poses[ii, :, :4].astype('float32').tolist()
+
+                transform['frames'].append(frame)
 
         else:
             raise NotImplementedError(f'unknown dataset mode: {mode}')
@@ -76,7 +135,7 @@ class NeRFDataset(Dataset):
         frames = sorted(frames, key=lambda d: d['file_path'])
 
         # for colmap, manually interpolate a test set.
-        if mode == 'colmap' and type == 'test':
+        if mode == 'colmap' and self.type == 'test':
 
             # choose two random poses, and interpolate between.
             f0, f1 = np.random.choice(frames, 2, replace=False)
@@ -97,9 +156,9 @@ class NeRFDataset(Dataset):
         else:
             # for colmap, manually split a valid set (the first frame).
             if mode == 'colmap':
-                if type == 'train':
+                if self.type == 'train':
                     frames = frames[1:]
-                elif type == 'val':
+                elif self.type == 'val':
                     frames = frames[:1]
                 # else 'all': use all frames
 
@@ -107,6 +166,7 @@ class NeRFDataset(Dataset):
             self.images = []
             for f in frames:
                 f_path = os.path.join(self.root_path, f['file_path'])
+                print(f_path, f['file_path'], self.root_path)
                 if not f_path.lower().endswith(('.jpg', '.jpeg', '.png')):
                     f_path += '.png' # so silly...
 
@@ -115,6 +175,9 @@ class NeRFDataset(Dataset):
                     continue
 
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                if self.type == 'llff':
+                    pose[:3, :3] = LLFF_TO_BLENDER[:3, :3] @ pose[:3, :3]
+
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
@@ -166,13 +229,13 @@ class NeRFDataset(Dataset):
         self.poses = lietorch.SE3(SE3_from_transform(self.poses))
 
         # Add pose noise, if desired.
-        if trans_noise > 0. and type == 'train':
+        if trans_noise > 0. and self.type == 'train':
             self.poses.data[:, :3] += trans_noise * torch.randn(self.N, 3)
 
         # Add rotation noise, if desired.
         # We do this by sampling a random axis-angle rotation vector + applying to
         # GT poses.
-        if rot_noise > 0. and type == 'train':
+        if rot_noise > 0. and self.type == 'train':
             rot_vecs = rot_noise * torch.randn(self.N, 3)
             self.poses = lietorch.SE3(lietorch.SO3.exp(rot_vecs)) * self.poses
 

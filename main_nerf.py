@@ -63,7 +63,7 @@ if __name__ == '__main__':
         # need different milestones for GUI/CMD mode.
         scheduler = lambda optimizer: optim.lr_scheduler.MultiStepLR(optimizer, milestones=[625, 1000] if opt.gui else [100, 150], gamma=0.33)
 
-        trainer = Trainer('ngp', vars(opt), model, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, metrics=[PSNRMeter()], use_checkpoint='latest', eval_interval=50)
+        trainer = Trainer('ngp', vars(opt), model, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, metrics=[PSNRMeter()], use_checkpoint='latest', eval_interval=15)
 
         # need different dataset type for GUI/CMD mode.
 
@@ -106,7 +106,7 @@ if __name__ == '__main__':
             valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=1, pin_memory=True)
 
             # train 200 epochs, each epoch has 100 steps --> in total 20,000 steps
-            trainer.train(train_loader, valid_loader, 50, 100)
+            trainer.train(train_loader, valid_loader, 200, 100)
 
             # also test
             test_dataset = NeRFDataset(opt.path, type='test', mode=opt.mode, scale=opt.scale, preload=opt.preload)

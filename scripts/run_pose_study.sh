@@ -1,6 +1,6 @@
 ### Translation study
 
-# python main_nerf.py data/nerf_synthetic/lego --workspace logs/pose_study/trans/1em3/nopt --bound 1.5 --scale 1.0 --mode blender --trans_noise 1e-3
+python main_nerf.py data/nerf_synthetic/lego --workspace logs/pose_study/trans/1em3/nopt --bound 1.5 --scale 1.0 --mode blender --trans_noise 1e-3
 
 python main_nerf.py data/nerf_synthetic/lego --workspace logs/pose_study/trans/1em3/opt --bound 1.5 --scale 1.0 --mode blender --trans_noise 1e-3 --opt_poses
 

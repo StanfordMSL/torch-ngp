@@ -102,7 +102,7 @@ class NeRFRenderer(nn.Module):
             self.register_buffer('step_counter', step_counter)
             self.mean_count = 0
             self.local_step = 0
-    
+
     def forward(self, x, d):
         raise NotImplementedError()
 
@@ -111,7 +111,7 @@ class NeRFRenderer(nn.Module):
 
     def reset_extra_state(self):
         if not self.cuda_ray:
-            return 
+            return
         # density grid
         self.density_grid.zero_()
         self.mean_density = 0
@@ -204,8 +204,8 @@ class NeRFRenderer(nn.Module):
 
         # calculate weight_sum (mask)
         weights_sum = weights.sum(dim=-1) # [N]
-        
-        # calculate depth 
+
+        # calculate depth
         ori_z_vals = ((z_vals - near) / (far - near)).clamp(0, 1)
         depth = torch.sum(weights * ori_z_vals, dim=-1)
 
@@ -215,7 +215,7 @@ class NeRFRenderer(nn.Module):
         # mix background color
         if bg_color is None:
             bg_color = 1
-            
+
         image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
 
         return depth, image
@@ -246,17 +246,17 @@ class NeRFRenderer(nn.Module):
             depth = None # currently training do not requires depth
 
         else:
-           
-            # allocate outputs 
+
+            # allocate outputs
             # if use autocast, must init as half so it won't be autocasted and lose reference.
             #dtype = torch.half if torch.is_autocast_enabled() else torch.float32
             # output should always be float32! only network inference uses half.
             dtype = torch.float32
-            
+
             weights_sum = torch.zeros(N, dtype=dtype, device=device)
             depth = torch.zeros(N, dtype=dtype, device=device)
             image = torch.zeros(N, 3, dtype=dtype, device=device)
-            
+
             n_alive = N
             alive_counter = torch.zeros([1], dtype=torch.int32, device=device)
 
@@ -272,7 +272,7 @@ class NeRFRenderer(nn.Module):
             i = 0
             while step < 1024: # max step
 
-                # count alive rays 
+                # count alive rays
                 if step == 0:
                     # init rays at first step.
                     torch.arange(n_alive, out=rays_alive[0])
@@ -281,7 +281,7 @@ class NeRFRenderer(nn.Module):
                     alive_counter.zero_()
                     raymarching.compact_rays(n_alive, rays_alive[i % 2], rays_alive[(i + 1) % 2], rays_t[i % 2], rays_t[(i + 1) % 2], alive_counter)
                     n_alive = alive_counter.item() # must invoke D2H copy here
-                
+
                 # exit loop
                 if n_alive <= 0:
                     break
@@ -304,18 +304,18 @@ class NeRFRenderer(nn.Module):
 
         return depth, image
 
-    
+
     def update_extra_state(self, decay=0.95):
         # call before each epoch to update extra states.
 
         if not self.cuda_ray:
-            return 
-        
+            return
+
         ### update density grid
         resolution = self.density_grid.shape[0]
 
         half_grid_size = self.bound / resolution
-        
+
         X = torch.linspace(-self.bound + half_grid_size, self.bound - half_grid_size, resolution).split(128)
         Y = torch.linspace(-self.bound + half_grid_size, self.bound - half_grid_size, resolution).split(128)
         Z = torch.linspace(-self.bound + half_grid_size, self.bound - half_grid_size, resolution).split(128)
@@ -339,7 +339,7 @@ class NeRFRenderer(nn.Module):
                         # query density
                         density = self.density(pts.to(tmp_grid.device))[:n].reshape(lx, ly, lz).detach()
                         tmp_grid[xi * 128: xi * 128 + lx, yi * 128: yi * 128 + ly, zi * 128: zi * 128 + lz] = density
-        
+
         # ema update
         self.density_grid = torch.maximum(self.density_grid * decay, tmp_grid)
         self.mean_density = torch.mean(self.density_grid).item()
@@ -384,5 +384,5 @@ class NeRFRenderer(nn.Module):
         results = {}
         results['depth'] = depth
         results['rgb'] = image
-            
+
         return results
