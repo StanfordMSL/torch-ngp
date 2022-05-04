@@ -25,8 +25,9 @@ def nerf_matrix_to_ngp(pose, scale=0.33):
 
 
 class NeRFDataset(Dataset):
-    def __init__(self, path, type='train', mode='colmap', preload=False,
-                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0, rot_noise=0.0):
+    def __init__(self, path, conf, type='train', mode='colmap', preload=False,
+                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0, rot_noise=0.0,
+                 bg_nerf=None):
         super().__init__()
         # path: the json file path.
 
@@ -35,6 +36,7 @@ class NeRFDataset(Dataset):
         self.mode = mode # colmap, blender, llff
         self.downscale = downscale
         self.preload = preload # preload data into GPU
+        self.bg_nerf = bg_nerf
 
         # camera radius scale to make sure camera are inside the bounding box.
         self.scale = scale
@@ -188,13 +190,34 @@ class NeRFDataset(Dataset):
         else:
             self.all_rgbs = None
 
+        # If using a NeRF background, pre-render pixels.
+        if self.bg_nerf is not None:
+            self.all_bg_colors = []
+            self.all_bg_depths = []
+            self.all_bg_weights = []
+            # Render all rays of bg_nerf from dataset poses.
+            for pose in self.poses:
+                rays_o, rays_d = get_rays(self.directions, pose)
+                bg_color, bg_depth, bg_weight = self.bg_nerf.render(rays_o, rays_d, staged=True, bg_color=None, perturb=False, **conf)
+                self.all_bg_colors.append(bg_color)
+                self.all_bg_depths.append(bg_depth)
+                self.all_bg_weights.append(bg_weight)
+        else:
+            self.all_bg_colors = self.all_bg_depths = self.all_bg_weights = None
+
         # free
         del self.directions
         del self.images
+        del bg_nerf
 
         # stack
         if self.all_rgbs is not None:
             self.all_rgbs = torch.stack(self.all_rgbs, dim=0)
+
+        if self.bg_colors is not None:
+            self.all_bg_colors = torch.stack(self.all_bg_colors, dim=0)
+            self.all_bg_depths = torch.stack(self.all_bg_depths, dim=0)
+            self.all_bg_weights = torch.stack(self.all_bg_weights, dim=0)
 
         # mix all rays from different images in training
         if self.type == 'train' or self.type == 'all':
@@ -203,6 +226,11 @@ class NeRFDataset(Dataset):
             if self.all_rgbs is not None:
                 self.all_rgbs = self.all_rgbs.view(-1, self.all_rgbs.shape[-1])
 
+            if self.all_bg_colors is not None:
+                self.all_bg_colors = self.all_bg_colors.view(-1, self.all_bg_colors.shape[-1])
+            self.all_bg_depths = self.all_bg_depths.view(-1)
+            self.all_bg_weights = self.all_bg_depths.view(-1)
+
         self.indices = torch.arange(len(self))
 
         if preload:
@@ -210,6 +238,10 @@ class NeRFDataset(Dataset):
             self.all_poses = self.all_poses.cuda()
             if self.all_rgbs is not None:
                 self.all_rgbs = self.all_rgbs.cuda()
+            if self.all_bg_colors is not None:
+                self.all_bg_colors = self.all_bg_colors.cuda()
+                self.all_bg_depths = self.all_bg_depths.cuda()
+                self.all_bg_weights = self.all_bg_weights.cuda()
 
 
     def __len__(self):
@@ -223,6 +255,11 @@ class NeRFDataset(Dataset):
             'index': index,
             'dims': (self.N, self.H, self.W)
         }
+
+        if self.all_bg_colors is not None:
+            results['bg_color'] = self.all_bg_colors[index]
+            results['bg_depth'] = self.all_bg_depths[index]
+            results['bg_weight'] = self.all_bg_weights[index]
 
         if self.type != 'test' or self.mode == 'blender':
             results['rgbs'] = self.all_rgbs[index]
