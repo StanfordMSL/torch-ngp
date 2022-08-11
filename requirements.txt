@@ -3,8 +3,8 @@ ninja
 trimesh
 opencv-python
 tensorboardX
-torch>=1.10
-numpy
+torch
+numpy 
 pandas
 tqdm
 matplotlib
@@ -12,6 +12,5 @@ PyMCubes
 rich
 pysdf
 dearpygui
+packaging
 scipy
-kornia
-git+https://github.com/princeton-vl/lietorch.git

@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from encoding import get_encoder
+from activation import trunc_exp
 from ffmlp import FFMLP
 
 from .renderer import NeRFRenderer
-
 
 class NeRFNetwork(NeRFRenderer):
     def __init__(self,
@@ -18,9 +18,9 @@ class NeRFNetwork(NeRFRenderer):
                  num_layers_color=3,
                  hidden_dim_color=64,
                  bound=1,
-                 cuda_ray=False,
+                 **kwargs
                  ):
-        super().__init__(bound, cuda_ray)
+        super().__init__(bound, **kwargs)
 
         # sigma network
         self.num_layers = num_layers
@@ -49,48 +49,101 @@ class NeRFNetwork(NeRFRenderer):
         )
     
     def forward(self, x, d):
-        # x: [B, N, 3], in [-bound, bound]
-        # d: [B, N, 3], nomalized in [-1, 1]
-
-        prefix = x.shape[:-1]
-        x = x.view(-1, 3)
-        d = d.view(-1, 3)
+        # x: [N, 3], in [-bound, bound]
+        # d: [N, 3], nomalized in [-1, 1]
 
         # sigma
         x = self.encoder(x, bound=self.bound)
         h = self.sigma_net(x)
 
-        sigma = F.relu(h[..., 0])
+        #sigma = F.relu(h[..., 0])
+        sigma = trunc_exp(h[..., 0])
         geo_feat = h[..., 1:]
 
         # color        
         d = self.encoder_dir(d)
 
-        # TODO: avoid this cat op... 
-        # should pre-allocate output (col-major!), then inplace write from ffmlp & shencoder, finally transpose to row-major.
-        # this is impossible...
+        # TODO: preallocate space and avoid this cat?
         p = torch.zeros_like(geo_feat[..., :1]) # manual input padding
         h = torch.cat([d, geo_feat, p], dim=-1)
         h = self.color_net(h)
         
         # sigmoid activation for rgb
-        color = torch.sigmoid(h)
-    
-        sigma = sigma.view(*prefix)
-        color = color.view(*prefix, -1)
+        rgb = torch.sigmoid(h)
 
-        return sigma, color
+        return sigma, rgb
 
     def density(self, x):
-        # x: [B, N, 3], in [-bound, bound]
-
-        prefix = x.shape[:-1]
-        x = x.view(-1, 3)
+        # x: [N, 3], in [-bound, bound]
 
         x = self.encoder(x, bound=self.bound)
         h = self.sigma_net(x)
 
-        sigma = F.relu(h[..., 0])
-        sigma = sigma.view(*prefix)
+        #sigma = F.relu(h[..., 0])
+        sigma = trunc_exp(h[..., 0])
+        geo_feat = h[..., 1:]
 
-        return sigma
+        return {
+            'sigma': sigma,
+            'geo_feat': geo_feat,
+        }
+
+    # allow masked inference
+    def color(self, x, d, mask=None, geo_feat=None, **kwargs):
+        # x: [N, 3] in [-bound, bound]
+        # mask: [N,], bool, indicates where we actually needs to compute rgb.
+
+        #starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        #starter.record()
+
+        if mask is not None:
+            rgbs = torch.zeros(mask.shape[0], 3, dtype=x.dtype, device=x.device) # [N, 3]
+            # in case of empty mask
+            if not mask.any():
+                return rgbs
+            x = x[mask]
+            d = d[mask]
+            geo_feat = geo_feat[mask]
+
+            #print(x.shape, rgbs.shape)
+
+        #ender.record(); torch.cuda.synchronize(); curr_time = starter.elapsed_time(ender); print(f'mask = {curr_time}')
+        #starter.record()
+
+        d = self.encoder_dir(d)
+
+        p = torch.zeros_like(geo_feat[..., :1]) # manual input padding
+        h = torch.cat([d, geo_feat, p], dim=-1)
+
+        h = self.color_net(h)
+        
+        # sigmoid activation for rgb
+        h = torch.sigmoid(h)
+
+        #ender.record(); torch.cuda.synchronize(); curr_time = starter.elapsed_time(ender); print(f'call = {curr_time}')
+        #starter.record()
+
+        if mask is not None:
+            rgbs[mask] = h.to(rgbs.dtype)
+        else:
+            rgbs = h
+
+        #ender.record(); torch.cuda.synchronize(); curr_time = starter.elapsed_time(ender); print(f'unmask = {curr_time}')
+        #starter.record()
+
+        return rgbs
+
+    # optimizer utils
+    def get_params(self, lr):
+
+        params = [
+            {'params': self.encoder.parameters(), 'lr': lr},
+            {'params': self.sigma_net.parameters(), 'lr': lr},
+            {'params': self.encoder_dir.parameters(), 'lr': lr},
+            {'params': self.color_net.parameters(), 'lr': lr}, 
+        ]
+        if self.bg_radius > 0:
+            params.append({'params': self.encoder_bg.parameters(), 'lr': lr})
+            params.append({'params': self.bg_net.parameters(), 'lr': lr})
+        
+        return params
