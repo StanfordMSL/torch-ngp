@@ -233,7 +233,8 @@ class NeRFDataset(Dataset):
 
 class NeRFDepthDataset(Dataset):
     def __init__(self, path, type='train', mode='colmap', preload=False,
-                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0, rot_noise=0.0):
+                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0,
+                 rot_noise=0.0, max_depth=1.0, min_depth=0.0):
         super().__init__()
         # path: the json file path.
 
@@ -327,10 +328,8 @@ class NeRFDepthDataset(Dataset):
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W]
                 
                 # Rescale Depth
-                dmax = 3.0
-                dmin = 0.0
                 image = image.astype(np.float32) / (255.) # Should be 0 - 1 now
-                image = image * (dmax - dmin) + dmin
+                image = image * (max_depth - min_depth) + min_depth
 
                 if self.H is None or self.W is None:
                     self.H = image.shape[0] // downscale
