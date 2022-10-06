@@ -4,6 +4,8 @@ import glob
 import json
 import numpy as np
 
+import pdb
+
 import torch
 from torch.utils.data import Dataset
 
@@ -226,5 +228,209 @@ class NeRFDataset(Dataset):
 
         if self.type != 'test' or self.mode == 'blender':
             results['rgbs'] = self.all_rgbs[index]
+
+        return results
+
+class NeRFDepthDataset(Dataset):
+    def __init__(self, path, type='train', mode='colmap', preload=False,
+                 downscale=1, scale=0.33, n_test=10, trans_noise=0.0, rot_noise=0.0):
+        super().__init__()
+        # path: the json file path.
+
+        self.root_path = path
+        self.type = type # train, val, test
+        self.mode = mode # colmap, blender, llff
+        self.downscale = downscale
+        self.preload = preload # preload data into GPU
+
+        # camera radius scale to make sure camera are inside the bounding box.
+        self.scale = scale
+
+        # load nerf-compatible format data.
+        if mode == 'colmap':
+            with open(os.path.join(path, 'transforms.json'), 'r') as f:
+                transform = json.load(f)
+        elif mode == 'blender':
+            # load all splits (train/valid/test), this is what instant-ngp in fact does...
+            if type == 'all':
+                transform_paths = glob.glob(os.path.join(path, '*.json'))
+                transform = None
+                for transform_path in transform_paths:
+                    with open(transform_path, 'r') as f:
+                        tmp_transform = json.load(f)
+                        if transform is None:
+                            transform = tmp_transform
+                        else:
+                            transform['frames'].extend(tmp_transform['frames'])
+            # only load one specified split
+            else:
+                with open(os.path.join(path, f'transforms_{type}.json'), 'r') as f:
+                    transform = json.load(f)
+
+        else:
+            raise NotImplementedError(f'unknown dataset mode: {mode}')
+
+        # load image size
+        if 'h' in transform and 'w' in transform:
+            self.H = int(transform['h']) // downscale
+            self.W = int(transform['w']) // downscale
+        else:
+            # we have to actually read an image to get H and W later.
+            self.H = self.W = None
+
+        # read images
+        frames = transform["frames"]
+        frames = sorted(frames, key=lambda d: d['file_path'])
+
+        # for colmap, manually interpolate a test set.
+        if mode == 'colmap' and type == 'test':
+
+            # choose two random poses, and interpolate between.
+            f0, f1 = np.random.choice(frames, 2, replace=False)
+            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale) # [4, 4]
+            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale) # [4, 4]
+            rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+            slerp = Slerp([0, 1], rots)
+
+            self.poses = []
+            self.images = None
+            for i in range(n_test + 1):
+                ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
+                pose = np.eye(4, dtype=np.float32)
+                pose[:3, :3] = slerp(ratio).as_matrix()
+                pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+                self.poses.append(pose)
+
+        else:
+            # for colmap, manually split a valid set (the first frame).
+            if mode == 'colmap':
+                if type == 'train':
+                    frames = frames[1:]
+                elif type == 'val':
+                    frames = frames[:1]
+                # else 'all': use all frames
+
+            self.poses = []
+            self.images = []
+            for f in frames:
+                f_path = os.path.join(self.root_path, f['file_path'])
+                if not f_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    f_path += '.png' # so silly...
+
+                # there are non-exist paths in fox...
+                if not os.path.exists(f_path):
+                    continue
+
+                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                pose = nerf_matrix_to_ngp(pose, scale=self.scale)
+
+                image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W]
+                
+                # Rescale Depth
+                dmax = 3.0
+                dmin = 0.0
+                image = image.astype(np.float32) / (255.) # Should be 0 - 1 now
+                image = image * (dmax - dmin) + dmin
+
+                if self.H is None or self.W is None:
+                    self.H = image.shape[0] // downscale
+                    self.W = image.shape[1] // downscale
+
+                if image.shape[0] != self.H or image.shape[1] != self.W:
+                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+
+                self.poses.append(pose)
+                self.images.append(image)
+
+        self.N = len(self.poses)
+
+        if self.images is not None:
+            self.images = np.stack(self.images, axis=0)
+
+        # load intrinsics
+        if 'fl_x' in transform or 'fl_y' in transform:
+            fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
+            fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
+        elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
+            # blender, assert in radians. already downscaled since we use H/W
+            fl_x = self.W / (2 * np.tan(transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
+            fl_y = self.H / (2 * np.tan(transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
+            if fl_x is None: fl_x = fl_y
+            if fl_y is None: fl_y = fl_x
+        else:
+            raise RuntimeError('cannot read focal!')
+
+        cx = (transform['cx'] / downscale) if 'cx' in transform else (self.H / 2)
+        cy = (transform['cy'] / downscale) if 'cy' in transform else (self.W / 2)
+
+        # pre-generate rays from poses
+        self.directions = get_ray_directions(self.H, self.W, [fl_x, fl_y], [cx, cy])  # [H, W, 3]
+        self.all_directions = self.directions.reshape(1, self.H, self.W, 3)
+        self.all_directions = self.all_directions.expand(self.N, -1, -1, -1)
+
+        self.poses = np.stack(self.poses, axis=0)
+        self.poses = lietorch.SE3(SE3_from_transform(self.poses))
+
+        # Add pose noise, if desired.
+        if trans_noise > 0. and type == 'train':
+            self.poses.data[:, :3] += trans_noise * torch.randn(self.N, 3)
+
+        # Add rotation noise, if desired.
+        # We do this by sampling a random axis-angle rotation vector + applying to
+        # GT poses.
+        if rot_noise > 0. and type == 'train':
+            rot_vecs = rot_noise * torch.randn(self.N, 3)
+            self.poses = lietorch.SE3(lietorch.SO3.exp(rot_vecs)) * self.poses
+
+        self.all_poses = lietorch.SE3(self.poses.data)
+        self.all_poses.data = self.all_poses.data.reshape(self.N, 1, 1, 7)
+        self.all_poses.data = self.all_poses.data.expand(-1, self.H, self.W, -1)
+
+        if self.images is not None:
+            self.all_depths = []
+            for image in self.images:
+                depth = torch.from_numpy(image) # [H, W] depth image
+                self.all_depths.append(depth)
+        else:
+            self.all_depths = None
+
+        # free
+        del self.directions
+        del self.images
+
+        # stack
+        if self.all_depths is not None:
+            self.all_depths = torch.stack(self.all_depths, dim=0)
+
+        # mix all rays from different images in training
+        if self.type == 'train' or self.type == 'all':
+            self.all_directions = self.all_directions.reshape(-1, 3)
+            self.all_poses.data = self.all_poses.data.reshape(-1, 7)
+            if self.all_depths is not None:
+                self.all_depths = self.all_depths.view(-1)
+
+        self.indices = torch.arange(len(self))
+
+        if preload:
+            self.all_directions = self.all_directions.cuda()
+            self.all_poses = self.all_poses.cuda()
+            if self.all_depths is not None:
+                self.all_depths = self.all_depths.cuda()
+
+
+    def __len__(self):
+        return self.all_directions.shape[0]
+
+    def __getitem__(self, index):
+
+        results = {
+            'directions': self.all_directions[index],
+            'pose_data': self.all_poses.data[index].detach(),
+            'index': index,
+            'dims': (self.N, self.H, self.W)
+        }
+
+        if self.type != 'test' or self.mode == 'blender':
+            results['depths'] = self.all_depths[index]
 
         return results

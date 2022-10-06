@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import pdb
+
 import raymarching
 
 def sample_pdf(bins, weights, n_samples, det=False):
@@ -386,3 +388,170 @@ class NeRFRenderer(nn.Module):
         results['rgb'] = image
             
         return results
+
+    # New python only rendering code
+    def render_rgb(self, rays_o, rays_d, num_steps=128, bg_color=None, perturb=False):
+        """ Rendering color only.
+        """
+        N = rays_o.shape[0]
+        device = rays_o.device
+
+        # sample steps (z_vals)
+        near, far = near_far_from_bound(rays_o, rays_d, self.bound, type='cube')
+        z_vals = torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0) # [1, T]
+        z_vals = z_vals.expand((N, num_steps)) # [N, T]
+        z_vals = near + (far - near) * z_vals # [N, T], in [near, far]
+
+        # perturb z_vals
+        sample_dist = (far - near) / num_steps
+        if perturb:
+            z_vals = z_vals + (torch.rand(z_vals.shape, device=device) - 0.5) * sample_dist
+
+        # generate sample points and directions
+        pts = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1) # [N, 1, 3] * [N, T, 3] -> [N, T, 3]
+        pts = pts.clamp(-self.bound, self.bound) # must be strictly inside the bounds, else lead to nan in hashgrid encoder!
+
+        dirs = rays_d.unsqueeze(-2).expand_as(pts)
+
+        # Query density and color networks
+        sigmas, rgbs = self(pts.reshape(-1, 3), dirs.reshape(-1, 3))
+
+        rgbs = rgbs.reshape(N, num_steps, 3) # [N, T, 3]
+        sigmas = sigmas.reshape(N, num_steps) # [N, T]
+
+        ### render core
+        deltas = z_vals[..., 1:] - z_vals[..., :-1] # [N, T-1]
+        deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+
+        alphas = 1 - torch.exp(-deltas * sigmas) # [N, T]
+        alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+1]
+        weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T]
+
+        # calculate weight_sum (mask)
+        weights_sum = weights.sum(dim=-1) # [N]
+        
+        # calculate color
+        image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
+
+        # mix background color
+        if bg_color is None:
+            bg_color = 1
+            
+        image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+
+        return image
+
+    def render_d(self, rays_o, rays_d, num_steps=128, perturb=False, max_depth=None, rectify=False, dvar=False):
+        N = rays_o.shape[0]
+        device = rays_o.device
+
+        # sample steps
+        near, far = near_far_from_bound(rays_o, rays_d, self.bound, type='cube')
+        z_vals = torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0) # [1, T]
+        z_vals = z_vals.expand((N, num_steps)) # [N, T]
+        z_vals = near + (far - near) * z_vals # [N, T], in [near, far]
+
+        # perturb z_vals
+        sample_dist = (far - near) / num_steps
+        if perturb:
+            z_vals = z_vals + (torch.rand(z_vals.shape, device=device) - 0.5) * sample_dist
+
+        # generate pts
+        pts = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1) # [N, 1, 3] * [N, T, 3] -> [N, T, 3]
+        pts = pts.clamp(-self.bound, self.bound) # must be strictly inside the bounds, else lead to nan in hashgrid encoder!
+
+        # Query only the density network
+        sigmas = self.density(pts.reshape(-1, 3))
+        sigmas = sigmas.reshape(N, num_steps) # [N, T]
+
+        ### render core
+        # Compute Deltas
+        deltas = z_vals[..., 1:] - z_vals[..., :-1] # [N, T-1]
+        deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+
+        # Compute alphas
+        alphas = 1 - torch.exp(-deltas * sigmas) # [N, T]
+        alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+1]
+        weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T]
+        
+        # calculate depth 
+        if rectify:
+            ori_z_vals = ((z_vals - near) / (far - near)).clamp(0, 1)
+            depth = torch.sum(weights * ori_z_vals, dim=-1) # Depth between near and far
+        else:
+            depth = torch.sum(weights * z_vals, dim=-1) # Raw depth [N]
+
+        if dvar:
+            derror = torch.square(z_vals - depth.unsqueeze(-1).expand_as(z_vals))
+            dvar = torch.sum(weights * derror, dim=-1)
+        else:
+            dvar = None
+
+        if max_depth is not None:
+            weights_sum = weights.sum(dim=-1) # [N]
+            depth = depth + (1 - weights_sum) * max_depth
+
+        return depth, dvar
+
+    def render_rgbd(self,  rays_o, rays_d, num_steps=128, bg_color=None, rectify=False, perturb=False, dvar=False):
+        N = rays_o.shape[0]
+        device = rays_o.device
+
+        # sample steps
+        near, far = near_far_from_bound(rays_o, rays_d, self.bound, type='cube')
+
+        #print(f'near = {near.min().item()} ~ {near.max().item()}, far = {far.min().item()} ~ {far.max().item()}')
+
+        z_vals = torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0) # [1, T]
+        z_vals = z_vals.expand((N, num_steps)) # [N, T]
+        z_vals = near + (far - near) * z_vals # [N, T], in [near, far]
+
+        # perturb z_vals
+        sample_dist = (far - near) / num_steps
+        if perturb:
+            z_vals = z_vals + (torch.rand(z_vals.shape, device=device) - 0.5) * sample_dist
+            #z_vals = z_vals.clamp(near, far) # avoid out of bounds pts.
+
+        # generate sample points and directions
+        pts = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1) # [N, 1, 3] * [N, T, 3] -> [N, T, 3]
+        pts = pts.clamp(-self.bound, self.bound) # must be strictly inside the bounds, else lead to nan in hashgrid encoder!
+        dirs = rays_d.unsqueeze(-2).expand_as(pts)
+
+        # Query networks
+        sigmas, rgbs = self(pts.reshape(-1, 3), dirs.reshape(-1, 3))
+        rgbs = rgbs.reshape(N, num_steps, 3) # [N, T, 3]
+        sigmas = sigmas.reshape(N, num_steps) # [N, T]
+
+        ### render core
+        deltas = z_vals[..., 1:] - z_vals[..., :-1] # [N, T-1]
+        deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[..., :1])], dim=-1)
+
+        alphas = 1 - torch.exp(-deltas * sigmas) # [N, T]
+        alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+1]
+        weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T]
+       
+        # calculate depth 
+        if rectify:
+            ori_z_vals = ((z_vals - near) / (far - near)).clamp(0, 1)
+            depth = torch.sum(weights * ori_z_vals, dim=-1) # Depth between near and far
+        else:
+            depth = torch.sum(weights * z_vals, dim=-1) # Raw depth
+
+        # calculate color
+        image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
+
+        # mix background color
+        if bg_color is None:
+            bg_color = 1
+ 
+        weights_sum = weights.sum(dim=-1) # [N]
+        image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+
+        if dvar:
+            derror = torch.square(z_vals - depth.unsqueeze(-1).expand_as(z_vals))
+            dvar = torch.sum(weights * derror, dim=-1)
+        else:
+            dvar = None
+
+        return image, depth, dvar
+
