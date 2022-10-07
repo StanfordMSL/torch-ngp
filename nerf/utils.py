@@ -29,6 +29,8 @@ from torch_ema import ExponentialMovingAverage
 
 from packaging import version as pver
 from itertools import cycle
+import json
+
 
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
@@ -67,7 +69,7 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
     
     results = {}
 
-    if model == "pinhole":
+    if camera_model == "pinhole":
         i, j = custom_meshgrid(torch.linspace(0, W-1, W, device=device), torch.linspace(0, H-1, H, device=device))
         i = i.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
         j = j.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
@@ -111,7 +113,7 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
         rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3]
     
     elif model == "touch":
-        if os.path.exists('data/touch_rays.pt')
+        if os.path.exists('data/touch_rays.pt'):
             # If we've already saved the touch rays to disk, just load them.
             dirs, mask = torch.load('data/touch_rays.pt')
         else:
@@ -443,6 +445,10 @@ class Trainer(object):
             return pred_rgb, None, loss
 
         #TODO: probably will have to change these lines for depth and touch
+        # ignore artifacts that say depth is zero
+        #if data['type'] == 'depth':
+        #    continue
+
         images = data['images'] # [B, N, 3/4]
 
         B, N, C = images.shape
@@ -474,14 +480,96 @@ class Trainer(object):
         #print(loss.shape)
         
         pred_rgb = outputs['image']
+        #print(torch.max(outputs['depth']))
+        print(torch.min(outputs['depth']))
         
+        #print("HEEEEEEEEY")
+       
         if data['type'] == 'rgb':
+            #print("rgb")
+            #print(images)
+
             loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
-        
         elif data['type'] == 'depth':
-            pred_depth = torch.unsqueeze(outputs['depth'],dim=-1)
-            l1 = nn.L1Loss()
-            loss = l1(pred_depth,gt_rgb)
+        
+            d = images.device
+            t = images.dtype    
+            #rgb = torch.zeros((images.shape[0],images.shape[1],4)).to(d,t)
+            rgb = torch.cat((images,torch.zeros(images.shape).to(d,t),torch.zeros(images.shape).to(d,t),torch.zeros(images.shape).to(d,t)),axis=-1)
+            #print(rgb)
+            inds = torch.squeeze((images == 0),axis=-1) | torch.squeeze((images == 1),axis=-1)
+            #print("HO?")
+            #print(torch.squeeze((images == 0),axis=-1).nonzero().shape)
+            #print(torch.squeeze((images == 1),axis=-1).nonzero().shape)
+            #vals = rgb[non_zero_inds]
+            #vals[:,:3] = 0
+            #vals[:,3] = 1
+            #rgb[non_zero_inds] = vals
+
+            gt_rgb = torch.squeeze(gt_rgb,axis=-1)
+            pred_depth = outputs['depth']
+            
+            #print("depth!")
+            #print(gt_rgb.reshape(1,-1))
+            #print(pred_depth.reshape(1,-1))
+            #print(torch.max(gt_rgb))
+            #print(torch.min(gt_rgb))
+            #print(torch.max(pred_depth))
+            #print(torch.min(pred_depth))
+            
+            #print("dvar")
+            #print(outputs['d_var'])
+            d_diff = torch.abs(gt_rgb - pred_depth)
+            d_var = outputs['d_var']
+            #zero_loss = torch.zeros(d_diff.shape).to(d,t)
+            l2 = torch.nn.MSELoss()
+            l1 = torch.nn.L1Loss()
+            depth_loss = l2(pred_depth,gt_rgb) #torch.mean((d_diff/torch.sqrt(d_var)))
+            #print("l1 : " + str(l1(pred_depth,gt_rgb).detach().cpu().numpy()))
+            #f = torch.nn.GaussianNLLLoss(eps=0.001)
+            #cond = (d_diff - torch.sqrt(d_var)) > 0
+            #print(pred_depth.shape)
+            #print(gt_rgb.shape)
+            #print(d_var.shape)
+            #print(pred_depth[cond].shape)
+            #print(gt_rgb[cond].shape)
+            #print(d_var[cond].shape)
+            #depth_loss = torch.mean(f(pred_depth[cond], gt_rgb[cond], d_var[cond]))
+
+            bg_color = torch.rand_like(rgb[..., :3]) # [N, 3], pixel-wise random.
+            gt = rgb[..., :3] * rgb[..., 3:] + bg_color * (1 - rgb[..., 3:])
+            
+            gt_zeros = gt[inds]
+            pred_rgb = outputs['image'][inds]
+            
+            loss = depth_loss #+ torch.max(torch.abs(pred_rgb-gt_zeros),dim=-1)[0].mean()
+            #print(rgb.shape)
+            #print(pred_rgb.shape)
+            #loss = torch.max(torch.abs(outputs['image']-rgb),dim=-1)[0].mean()
+            #print("loss")
+            #print(loss)
+            #print("predicted depth")
+            #print(torch.flatten(pred_depth)[0:5])
+            #print("ground truth depth")
+            #print(torch.flatten(gt_rgb)[0:5])
+            
+            #print(torch.max(outputs['depth']))
+            #print(torch.min(outputs['depth']))
+            #print(torch.max(gt_rgb))
+            #print(torch.min(gt_rgb))
+            #print(" ")
+            #print(loss)
+            #print(loss)
+            #print("predicted")
+            #print(torch.squeeze(pred_depth))
+            #print("ground truth")
+            #print(torch.squeeze(gt_rgb))
+            #print(torch.max(pred_depth))
+            #print(torch.min(pred_depth))
+            #print(torch.max(gt_rgb))
+            #print(torch.min(gt_rgb))
+            #print(gt_rgb.shape)
+            #print(pred_depth.shape)
             #loss = torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
 
         elif self.opt.image_type == 'touch':
@@ -531,6 +619,7 @@ class Trainer(object):
             self.error_map[index] = error_map
 
         loss = loss.mean()
+        #print(loss)
 
         return pred_rgb, gt_rgb, loss
 
@@ -697,21 +786,35 @@ class Trainer(object):
         self.model.train()
 
         total_loss = torch.tensor([0], dtype=torch.float32, device=self.device)
-        
-        loader = iter(train_loader)
+       
+
+        # allow for multiple datasets to be trained at once!
+        # ensure only the smaller datasets are cycled through!
+        loader_lens = [len(train_loader[i]) for i in range(len(train_loader))]
+        index = loader_lens.index(max(loader_lens))
+        zipper = [cycle(train_loader[i]) for i in range(len(train_loader))]
+        loader = zip(*zipper)
+
+
+        #loader = iter(zipper)
 
         # mark untrained grid
+        # mark untrained region (i.e., not covered by any camera from the training dataset)
+        training_poses = [train_loader[i]._data.poses for i in range(len(train_loader))]
+        training_intrinsics = [train_loader[i]._data.intrinsics for i in range(len(train_loader))]
         if self.global_step == 0:
-            self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
+            self.model.mark_untrained_grid(training_poses, training_intrinsics)
+            #self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
 
         for _ in range(step):
             
+            data = next(loader)
             # mimic an infinite loop dataloader (in case the total dataset is smaller than step)
-            try:
-                data = next(loader)
-            except StopIteration:
-                loader = iter(train_loader)
-                data = next(loader)
+            #try:
+            #    data = next(loader)
+            #except StopIteration:
+            #    loader = iter(train_loader)
+            #    data = next(loader)
 
             # update grid every 16 steps
             if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
@@ -719,20 +822,27 @@ class Trainer(object):
                     self.model.update_extra_state()
             
             self.global_step += 1
+            for d in data:
+                self.optimizer.zero_grad()
 
-            self.optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = self.train_step(data)
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, truths, loss = self.train_step(d)
          
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+                self.scaler.scale(loss).backward()
+                #print("MODEL")
+                #print(self.model.sigma_net[0].weight.grad)
+                #print(self.model.sigma_net[1].weight.grad)
+                #print(self.model.color_net[0].weight.grad)
+                #print(self.model.color_net[1].weight.grad)
+                #print(self.model.color_net[2].weight.grad)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                
             
-            if self.scheduler_update_every_step:
-                self.lr_scheduler.step()
+                if self.scheduler_update_every_step:
+                    self.lr_scheduler.step()
 
-            total_loss += loss.detach()
+                total_loss += loss.detach()
 
         if self.ema is not None:
             self.ema.update()
@@ -930,9 +1040,23 @@ class Trainer(object):
             loader_lens = [len(loader[i]) for i in range(len(loader))]
             index = loader_lens.index(max(loader_lens))
             zipper = [loader[index]] + [cycle(loader[i]) for i in range(len(loader)) if i!=index]
+            
+            
             for data in zip(*zipper):
+                #print(" ")
+                #print("HEY!")
                 self.local_step += 1
+                
+                #print(data)
+                #stop
+              
+                
                 for d in data:
+                    #out_data = {} 
+                    #out_data['camera_angle_x'] = d['camera_angle_x']
+                    #out_data['frames'] = []
+                    #print(d)
+                    #stop
                     
                     with torch.cuda.amp.autocast(enabled=self.fp16):
                         preds, preds_depth, truths, loss = self.eval_step(d)
@@ -964,12 +1088,13 @@ class Trainer(object):
                             metric.update(preds, truths)
 
                         # save image
-                        save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}.png')
-                        save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
+                        save_path = os.path.join(self.workspace, 'validation', f'r_{self.local_step}.png')
+                        save_path_depth = os.path.join(self.workspace, 'validation/depth', f'r_{self.local_step}.png')
                         #save_path_gt = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_gt.png')
 
                         #self.log(f"==> Saving validation image to {save_path}")
                         os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        os.makedirs(os.path.dirname(save_path_depth), exist_ok=True)
 
                         if self.opt.color_space == 'linear':
                             preds = linear_to_srgb(preds)
@@ -979,6 +1104,25 @@ class Trainer(object):
                     
                         cv2.imwrite(save_path, cv2.cvtColor((pred * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
                         cv2.imwrite(save_path_depth, (pred_depth * 255).astype(np.uint8))
+                        
+                        #mat = []
+                        #print(" ")
+                        #print("val poses")
+                        #print(d['poses'].reshape(4,4))
+                        #print(d['poses'].reshape(4,4).shape)
+                        #for row in d['poses'].detach().cpu().numpy().reshape(4,4):
+                        #    mat.append(list(row))
+                        #    
+                        #print(mat)
+                        #frame = {'file_path':f'./train/r_{self.local_step:d}.png',
+                        #         'transform_matrix': d['poses'][0].detach().cpu().numpy().tolist(),
+                        #}
+                        #with open(os.path.join(self.workspace, 'validation', "train.json"), "a+") as file_object:   
+                        #    json.dump(frame, file_object,indent=4)
+                        #    file_object.write(',\n')
+                        #
+                        #out_data['frames'].append(frame)
+                        #print(out_data)
                         #cv2.imwrite(save_path_gt, cv2.cvtColor((linear_to_srgb(truths[0].detach().cpu().numpy()) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
 
                         for i in range(len(loader)):

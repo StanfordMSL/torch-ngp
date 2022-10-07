@@ -258,6 +258,9 @@ class _composite_rays_train(Function):
 
         _backend.composite_rays_train_forward(sigmas, rgbs, deltas, rays, M, N, weights_sum, depth, image)
 
+        #print("depth")
+        #print(depth)
+        #stop
         ctx.save_for_backward(sigmas, rgbs, deltas, rays, weights_sum, depth, image)
         ctx.dims = [M, N]
 
@@ -276,6 +279,7 @@ class _composite_rays_train(Function):
         M, N = ctx.dims
    
         grad_sigmas = torch.zeros_like(sigmas)
+        grad_depth = torch.zeros_like(depth)
         grad_rgbs = torch.zeros_like(rgbs)
 
         _backend.composite_rays_train_backward(grad_weights_sum, grad_image, sigmas, rgbs, deltas, rays, weights_sum, image, M, N, grad_sigmas, grad_rgbs)

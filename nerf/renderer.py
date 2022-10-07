@@ -127,6 +127,7 @@ class NeRFRenderer(nn.Module):
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
 
+        #print("HELLO NURSE!")
         prefix = rays_o.shape[:-1]
         rays_o = rays_o.contiguous().view(-1, 3)
         rays_d = rays_d.contiguous().view(-1, 3)
@@ -223,7 +224,21 @@ class NeRFRenderer(nn.Module):
         
         # calculate depth 
         ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
-        depth = torch.sum(weights * ori_z_vals, dim=-1)
+        #depth = torch.sum(weights * ori_z_vals, dim=-1)
+        #d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-ori_z_vals), dim=-1) + 1e-5
+        depth = torch.sum(weights * z_vals, dim=-1)
+        max_depth = 10
+        depth = depth + (1-weights_sum)*max_depth
+        d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-z_vals), dim=-1) + 1e-5
+        
+        #print("SHAPES")
+        #print(ori_z_vals.shape)
+        #print(depth.shape)
+        #print(d_var.shape)
+        
+        #print("HI")
+        
+        
 
         # calculate color
         image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
@@ -240,14 +255,20 @@ class NeRFRenderer(nn.Module):
 
         image = image.view(*prefix, 3)
         depth = depth.view(*prefix)
-
+        d_var = d_var.view(*prefix)
+        
         # tmp: reg loss in mip-nerf 360
         # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
         # mid_zs = (z_vals + z_vals_shifted) / 2 # [N, T]
         # loss_dist = (torch.abs(mid_zs.unsqueeze(1) - mid_zs.unsqueeze(2)) * (weights.unsqueeze(1) * weights.unsqueeze(2))).sum() + 1/3 * ((z_vals_shifted - z_vals_shifted) * (weights ** 2)).sum()
 
+        #print("OOOOOOOOIH")
+        #print(depth)
+        #print(depth.requires_grad)
+
         return {
             'depth': depth,
+            'd_var': d_var,
             'image': image,
         }
 
@@ -266,6 +287,11 @@ class NeRFRenderer(nn.Module):
         # pre-calculate near far
         nears, fars = raymarching.near_far_from_aabb(rays_o, rays_d, self.aabb_train if self.training else self.aabb_infer, self.min_near)
 
+        #print("OI MATE")
+        #print(nears)
+        #print(fars)
+        #print("")
+
         # mix background color
         if self.bg_radius > 0:
             # use the bg model to calculate bg_color
@@ -280,7 +306,10 @@ class NeRFRenderer(nn.Module):
             counter.zero_() # set to 0
             self.local_step += 1
 
-            xyzs, dirs, deltas, rays = raymarching.march_rays_train(rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, counter, self.mean_count, perturb, 128, force_all_rays, dt_gamma, max_steps)
+            xyzs, dirs, deltas, rays = raymarching.march_rays_train(rays_o, rays_d, self.bound, self.density_bitfield, 
+                                                                    self.cascade, self.grid_size, nears, fars, counter, 
+                                                                    self.mean_count, perturb, 128, force_all_rays, dt_gamma, 
+                                                                    max_steps)
 
             #plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
             
@@ -291,6 +320,7 @@ class NeRFRenderer(nn.Module):
             sigmas = self.density_scale * sigmas
 
             #print(f'valid RGB query ratio: {mask.sum().item() / mask.shape[0]} (total = {mask.sum().item()})')
+
 
             # special case for CCNeRF's residual learning
             if len(sigmas.shape) == 2:
@@ -314,6 +344,12 @@ class NeRFRenderer(nn.Module):
                 depth = torch.clamp(depth - nears, min=0) / (fars - nears)
                 image = image.view(*prefix, 3)
                 depth = depth.view(*prefix)
+
+                #print("render training result")
+                #print(image)
+                #print(image.requires_grad)
+                #print(depth)
+                #print(depth.requires_grad)
 
         else:
            
@@ -345,7 +381,10 @@ class NeRFRenderer(nn.Module):
                 # decide compact_steps
                 n_step = max(min(N // n_alive, 8), 1)
 
-                xyzs, dirs, deltas = raymarching.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, 128, perturb, dt_gamma, max_steps)
+                xyzs, dirs, deltas = raymarching.march_rays(n_alive, n_step, rays_alive, rays_t, 
+                                                            rays_o, rays_d, self.bound, self.density_bitfield, 
+                                                            self.cascade, self.grid_size, nears, fars, 128, perturb, 
+                                                            dt_gamma, max_steps)
 
                 sigmas, rgbs = self(xyzs, dirs)
                 # density_outputs = self.density(xyzs) # [M,], use a dict since it may include extra things, like geo_feat for rgb.
@@ -366,6 +405,11 @@ class NeRFRenderer(nn.Module):
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
 
+
+        #print("AH HOY THERE")
+        #print(fars)
+        #print(nears)
+        #stop
         return {
             'depth': depth,
             'image': image,
@@ -396,8 +440,8 @@ class NeRFRenderer(nn.Module):
                 poses = poses_list[i]
 
             B = poses.shape[0]
-            print(intrinsics_list[i])
-            print(intrinsics_list)
+            #print(intrinsics_list[i])
+            #print(intrinsics_list)
             fx, fy, cx, cy = intrinsics_list[i]
         
             poses = poses.to(count.device)
@@ -549,8 +593,14 @@ class NeRFRenderer(nn.Module):
         else:
             _run = self.run
 
+        #print("run funct")
+        #print(_run)
+
         B, N = rays_o.shape[:2]
         device = rays_o.device
+
+        #print("CUDA RAY DEC")
+        #print(self.cuda_ray)
 
         # never stage when cuda_ray
         if staged and not self.cuda_ray:

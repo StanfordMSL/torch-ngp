@@ -1,5 +1,5 @@
 import torch
-import lietorch
+#import lietorch
 import argparse
 
 from nerf.provider import NeRFDataset
@@ -85,7 +85,6 @@ if __name__ == '__main__':
 
     print(opt)
     print(opt.image_type)
-    
     seed_everything(opt.seed)
 
     model = NeRFNetwork(
@@ -127,7 +126,6 @@ if __name__ == '__main__':
                 print("not yet implemented!")
                 pass
 
-            stop
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
             else:

@@ -12,8 +12,9 @@ import imageio
 import cv2
 from scipy.spatial.transform import Rotation as R
 import scipy
-import procrustes
-from procrustes import generic
+#import procrustes
+#from procrustes import generic
+from scipy import linalg
 
 # helper function that allows sorting of data files by names
 def file_sort(name):
@@ -28,7 +29,49 @@ def tf_from_vect(quaternions, translation):
     tf[3,3] = 1
     return tf
 
+def create_calibration_tf(fname):
 
+    with open(fname) as csv_file:
+        csv_reader = csv.reader(csv_file, delimiter=',')
+        line_count = 0
+        tfs_apr_mocap = []
+        tfs_cam_mocap  = []
+        tfs_cam_april = []
+        tfs_cam_mocap_tilda = []
+        for row in csv_reader:
+            if line_count != 0:
+                count, time_sec, time_nano = row[0], row[1], row[2]
+                tf_apr_mocap = row[3:10]
+                tf_cam_mocap = row[10:17]
+                tf_cam_april = row[24:]
+
+                TF_apr_mocap = tf_from_vect(tf_apr_mocap[3:],tf_apr_mocap[:3])
+                TF_cam_mocap = tf_from_vect(tf_cam_mocap[3:],tf_cam_mocap[:3])
+                TF_cam_april = tf_from_vect(tf_cam_april[3:],tf_cam_mocap[:3])
+
+                tf_cam_mocap_tilda =  TF_apr_mocap@np.linalg.inv(TF_cam_april)
+                
+                tfs_apr_mocap.append(TF_apr_mocap)
+                tfs_cam_mocap.append(TF_cam_mocap)
+                tfs_cam_april.append(TF_cam_april)
+                tfs_cam_mocap_tilda.append(tf_cam_mocap_tilda)
+                
+            line_count += 1
+            
+        tfs_apr_mocap = np.asarray(tfs_apr_mocap)
+        tfs_cam_mocap = np.asarray(tfs_cam_mocap)
+        tfs_cam_april = np.asarray(tfs_cam_april)
+        tfs_cam_mocap_tilda = np.asarray(tfs_cam_mocap_tilda)
+        
+        trans = np.mean(tfs_cam_mocap_tilda[:,:3,3] - tfs_cam_mocap[:,:3,3],axis=0)
+        rot = []
+        for i in range(tfs_cam_mocap.shape[0]):
+            result = linalg.orthogonal_procrustes(tfs_cam_mocap[i,:3,:3], tfs_cam_mocap_tilda[i,:3,:3])[0]
+            rot.append(result)
+        rot = np.asarray(rot)
+        rot = np.mean(rot,axis=0)
+        
+        return rot, trans
 
 trans_t = lambda t : torch.Tensor([
     [1,0,0,0],
@@ -60,6 +103,9 @@ rot_psi = lambda psi : np.array([
 def construct_json(args):
     
     print(args)
+    
+    calib_rot, calib_trans = create_calibration_tf('tfs.csv')
+    
     filenames = ['color_pose.csv','depth_pose.csv', 'touch_pose.csv']
     foldernames = ['color','depth','touch']
     offset = [np.array([0,0,0]),
@@ -143,6 +189,8 @@ def construct_json(args):
             tf = tf_from_vect(quaternion, translation)
             
             tf[:3,3] = tf[:3,3] + offset[i]
+            tf[:3,:3] = calib_rot@tf[:3,:3]
+            tf[:3,3] = tf[:3,3] + calib_trans
             tf = tf @ rot_phi(-np.pi/2)
             tf = tf @ rot_psi(np.pi)
             u, s, v = np.linalg.svd(tf[:3,:3])
@@ -153,10 +201,35 @@ def construct_json(args):
         
         tfs = np.array(tfs)
         
+        mean = np.mean(tfs[:,:3,3],axis=0)
+        for j in range(tfs.shape[0]):
+             tfs[j,:3,3] = tfs[j,:3,3] - mean
+                
+#         print(np.max(tfs[:,3,2]))
+#         print(np.min(tfs[:,3,2]))  
+        shift = (np.max(tfs[:,:3,3],axis=0) + np.min(tfs[:,:3,3],axis=0))/2
+        for j in range(tfs.shape[0]):
+            tfs[j,:3,3] = tfs[j,:3,3] - shift
+            
+        shift_z = - np.min(tfs[:,2,3],axis=0) #np.max(tfs[:,2,3],axis=0) - np.min(tfs[:,2,3],axis=0)
+        print("z-shift")
+        print(shift_z)
+        print(tfs[:,2,3])
+        #print(tfs3,3])
+        for j in range(tfs.shape[0]):
+            tfs[j,2,3] = tfs[j,2,3] + shift_z
+            
+        print("")
+        print("result")
+        print(tfs[:,2,3])
+        print(np.max(tfs[:,2,3]))
+        print(np.min(tfs[:,2,3])) 
+        print(tfs[0,:,:])
+#         stop
         frames = []
         for j in range(tfs.shape[0]):
             frame = {}
-            frame['file_path'] = os.path.join(args.data_path, foldernames[i], img_names[i])
+            frame['file_path'] = os.path.join(args.data_path, foldernames[i], 'images', img_names[j])
             sharpness = cv2.Laplacian(cv2.imread(os.path.join(img_dir,img_names[i])), cv2.CV_64F).var()
             frame['sharpness'] = sharpness
             tf_list = tfs[j].tolist() 
