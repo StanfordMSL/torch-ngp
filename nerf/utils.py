@@ -5,6 +5,7 @@ import math
 import random
 import warnings
 import tensorboardX
+import GPy
 
 import numpy as np
 import pandas as pd
@@ -31,7 +32,6 @@ from packaging import version as pver
 from itertools import cycle
 import json
 
-
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -50,8 +50,21 @@ def srgb_to_linear(x):
     return torch.where(x < 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
 
 
+# Generates GP from densetact data.
+def get_gp(data):
+    lines = data['lookuptable']
+
+    # Build GP using data.
+    X = np.atleast_2d(lines[:,0]).T
+    y = np.atleast_2d(lines[:,1]).T
+    kernel = GPy.kern.RBF(input_dim = 1, variance = 3.0, lengthscale = 40.0)
+    model_gp = GPy.models.GPRegression(X,y,kernel)
+    model_gp.optimize()
+
+    return model_gp
+
 @torch.cuda.amp.autocast(enabled=False)
-def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhole'):
+def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhole', MAX_TOUCH_ANGLE = 72.5):
     ''' get rays
     Args:
         poses: [B, 4, 4], cam2world
@@ -66,11 +79,18 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
     device = poses.device
     B = poses.shape[0]
     fx, fy, cx, cy = intrinsics
+
+    # print(camera_model)
+    # print("INTRINICS")
+    # print(H,W)
+    
     
     results = {}
 
     if camera_model == "pinhole":
         i, j = custom_meshgrid(torch.linspace(0, W-1, W, device=device), torch.linspace(0, H-1, H, device=device))
+        # print("MESH INDS")
+        # print(i)
         i = i.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
         j = j.t().reshape([1, H*W]).expand([B, H*W]) + 0.5
 
@@ -80,8 +100,9 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
             if error_map is None:
                 inds = torch.randint(0, H*W, size=[N], device=device) # may duplicate
                 inds = inds.expand([B, N])
+                # print("CHECKING INDS")
+                # print(inds)
             else:
-
                 # weighted sample on a low-reso grid
                 inds_coarse = torch.multinomial(error_map.to(device), N, replacement=False) # [B, N], but in [0, 128*128)
 
@@ -107,25 +128,29 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
         ys = (j - cy) / fy * zs
         directions = torch.stack((xs, ys, zs), dim=-1)
         directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+        # print("RGB")
+        # print(directions.shape)
         rays_d = directions @ poses[:, :3, :3].transpose(-1, -2) # (B, N, 3)
 
         rays_o = poses[..., :3, 3] # [B, 3]
         rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3]
     
-    elif model == "touch":
-        if os.path.exists('data/touch_rays.pt'):
+    elif camera_model == "touch":
+        if os.path.exists('./data/touch_rays.pt'):
             # If we've already saved the touch rays to disk, just load them.
-            dirs, mask = torch.load('data/touch_rays.pt')
+            # dirs, mask = torch.load('data/touch_rays.pt')
+            pass
         else:
+            # print("HELLO 1")
             assert W, H == (800, 600)
-            data = np.load('Sensor_calibration/table.npz')
-
+            data = np.load('./Sensor_calibration/table.npz')
             c_x, c_y = float(data['centerx']), float(data['centery'])
+            xx, yy = custom_meshgrid(c_x - torch.linspace(0, W-1, W, device=device), 
+                                     c_y - torch.linspace(0, H-1, H, device=device))
             
-            y = c_y - torch.arange(0,H)
-            x = c_x - torch.arange(0,W)
-            
-            xx, yy = torch.meshgrid(x, y, indexing='ij')
+            # print("HELLO 2")
+            xx = xx.reshape([1, H*W]).expand([B, H*W])
+            yy = yy.reshape([1, H*W]).expand([B, H*W])
             phi = torch.atan2(yy,xx)
 
             # If using real sensor, generate rays via GP.
@@ -136,6 +161,7 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
             theta, _ = gp.predict(r.reshape(-1,1).cpu().numpy())
             theta = torch.from_numpy(theta).reshape(xx.shape)
 
+            # print("HELLO 3")
             # Convert to radians.
             theta = (np.pi/180) * theta
 
@@ -145,28 +171,131 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
             # Generate mask by clipping to max angle of sensor.
             mask = theta <= (np.pi / 180) * MAX_TOUCH_ANGLE
 
-            dirs = torch.stack([torch.sin(theta)*torch.cos(phi),
-                                torch.sin(theta)*torch.sin(phi),
-                                -torch.cos(theta)], -1)
-
-            torch.save((dirs.transpose(0,1),mask.T), 'data/touch_rays.pt')
-
-
-            R = torch.Tensor([[np.cos(-np.pi/2), -1*np.sin(-np.pi/2), 0],
-                              [np.sin(-np.pi/2), np.cos(-np.pi/2), 0],
-                              [0, 0, 1]])
+            # print("THETA AND PHI")
+            # print(theta.shape)
+            # print(phi.shape)
+            # print("HELLO 4")
+            directions = torch.stack([torch.sin(theta)*torch.cos(phi),
+                                      torch.sin(theta)*torch.sin(phi),
+                                      -torch.cos(theta)], -1).reshape(-1,3)
             
-            dirs = dirs@R
-            dirs, mask = dirs.transpose(0,1), mask.T
+            # print(directions.shape)
+            # R = torch.Tensor([[np.cos(np.pi/2), -1*np.sin(np.pi/2), 0],
+            #                   [np.sin(np.pi/2), np.cos(np.pi/2), 0],
+            #                   [0, 0, 1]]).to(device)
+            R = torch.Tensor([[1, 0, 0],
+                              [0, np.cos(np.pi), -1*np.sin(np.pi)],
+                              [0, np.sin(np.pi), np.cos(np.pi)]]).to(device)
+            #R = torch.eye(3).to(device)
+            # print(R.shape)
+            # print(directions.t().shape)
+            # print((R@directions.t()).shape)
+            directions = ((R@directions.t()).t()).reshape(B,-1,3)
+            # print(directions.shape)
+            # print(mask.shape)
+            # view_dirs = directions.squeeze().detach().cpu().numpy()
+            # view_mask = mask.squeeze().detach().cpu().numpy()
+            # fig = plt.figure()
+            # ax = fig.add_subplot(projection='3d')
+            # ax.scatter(view_dirs[:,0],view_dirs[:,1],view_dirs[:,2], c=view_mask)
+            # ax.set_xlabel('X Label')
+            # ax.set_ylabel('Y Label')
+            # ax.set_zlabel('Z Label')
+            # plt.savefig('test.png')
+            # print("HELLO 5")
+            if N > 0:
+                # print("CHECK")
+                N = min(N, H*W)
+                inds = torch.multinomial(mask/torch.sum(mask), N, replacement=True)
+                directions = directions[torch.arange(directions.size(0)),inds]
 
-            rays_o = c2w[:3,-1].expand(rays_d.shape)
-            rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)
+                view_dirs = directions.squeeze().detach().cpu().numpy()
+                # fig = plt.figure()
+                # ax = fig.add_subplot(projection='3d')
+                # ax.scatter(view_dirs[:,0],view_dirs[:,1],view_dirs[:,2])
+                # ax.set_xlabel('X Label')
+                # ax.set_ylabel('Y Label')
+                # ax.set_zlabel('Z Label')
+                # plt.savefig('directions.png')
+                # stop
+                inds = inds.expand([B, N])
+                results['inds'] = inds
+                # print(N)
+                # print(directions.shape)
+                # print(inds)
+            
+            directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+            rays_d = directions @ poses[:, :3, :3].transpose(-1, -2)
+
+            rays_o = poses[..., :3, 3] # [B, 3]
+            rays_o = rays_o[..., None, :].expand_as(rays_d) # [B, N, 3]
 
             results['mask'] = mask
+            # print("HELLO 6")
+            #print(N)
+            #stop
+            #plt.scatter()
+    #         dirs = dirs.transpose(0,1)
+    #         rays_d = torch.sum(dirs[..., np.newaxis, :] * poses[:3,:3], -1)
+    #         results['mask'] = mask
+    #     else:
+    #         assert W, H == (800, 600)
+    #         data = np.load('./Sensor_calibration/table.npz')
 
+    #         c_x, c_y = float(data['centerx']), float(data['centery'])
+            
+    #         y = c_y - torch.arange(0,H)
+    #         x = c_x - torch.arange(0,W)
+            
+    #         xx, yy = torch.meshgrid(x, y, indexing='ij')
+    #         phi = torch.atan2(yy,xx)
+
+    #         # If using real sensor, generate rays via GP.
+    #         gp = get_gp(data)
+    #         r = torch.sqrt((xx)**2 + (yy)**2)
+
+    #         # Generate thetas via GP prediction.
+    #         theta, _ = gp.predict(r.reshape(-1,1).cpu().numpy())
+    #         theta = torch.from_numpy(theta).reshape(xx.shape)
+
+    #         # Convert to radians.
+    #         theta = (np.pi/180) * theta
+
+    #         # Put onto correct device, as needed.
+    #         theta = theta.to(phi.device, phi.dtype)
+
+    #         # Generate mask by clipping to max angle of sensor.
+    #         mask = theta <= (np.pi / 180) * MAX_TOUCH_ANGLE
+
+    #         dirs = torch.stack([torch.sin(theta)*torch.cos(phi),
+    #                             torch.sin(theta)*torch.sin(phi),
+    #                             -torch.cos(theta)], -1)
+    #         print("TOUCH")
+    #         print(dirs.shape)
+    #         #torch.save((dirs.transpose(0,1),mask.T), 'data/touch_rays.pt')
+
+
+    #         R = torch.Tensor([[np.cos(-np.pi/2), -1*np.sin(-np.pi/2), 0],
+    #                           [np.sin(-np.pi/2), np.cos(-np.pi/2), 0],
+    #                           [0, 0, 1]])
+            
+    #         dirs = dirs@R
+    #         dirs, mask = dirs.transpose(0,1).to(device), mask.T
+
+    #         print(dirs.shape)
+    #         print(dirs[..., np.newaxis, :].shape)
+    #         print(poses[:3,:3].shape)
+    #         print(poses[..., :3,:3].shape)
+    #         rays_d = torch.sum(dirs[..., np.newaxis, :] * poses[...,:3,:3], -1)
+    #         rays_o = poses[..., :3,-1].expand(rays_d.shape)
+
+    #         results['mask'] = mask
+
+    # print(rays_o.shape)
+    # print(rays_d.shape)
     results['rays_o'] = rays_o
     results['rays_d'] = rays_d
-
+    # print("HELLO 7")
     return results
 
 
@@ -433,7 +562,21 @@ class Trainer(object):
             H, W = data['H'], data['W']
 
             # currently fix white bg, MUST force all rays!
-            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, perturb=True, force_all_rays=True, **vars(self.opt))
+            if data['type'] == 'rgb':
+                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+                                            perturb=True, force_all_rays=True, datatype=data['type'],
+                                            max_depth=self.opt.depth_far, **vars(self.opt))
+            elif data['type'] == 'depth':
+                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+                                            perturb=True, force_all_rays=True, datatype=data['type'],
+                                            max_depth=self.opt.depth_far, **vars(self.opt))
+            elif data['type'] == 'touch':
+                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+                                            perturb=True, force_all_rays=True, datatype=data['type'],
+                                            max_depth=self.opt.touch_far, **vars(self.opt))
+
+
+
             pred_rgb = outputs['image'].reshape(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
 
             # [debug] uncomment to plot the images used in train_step
@@ -465,7 +608,7 @@ class Trainer(object):
             #bg_color = torch.rand(3, device=self.device) # [3], frame-wise random.
             if data['type'] == 'rgb':
                 bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
-            elif data['type'] == 'depth':
+            elif data['type'] == 'depth' or data['type'] == 'touch':
                 bg_color = torch.rand_like(images[..., :1]) # [N, 3], pixel-wise random.
 
         if C == 4:
@@ -473,122 +616,64 @@ class Trainer(object):
         else:
             gt_rgb = images
 
-        outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=False, **vars(self.opt))
-    
-        
-        #loss = self.criterion(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
-        #print(loss.shape)
-        
-        pred_rgb = outputs['image']
-        #print(torch.max(outputs['depth']))
-        print(torch.min(outputs['depth']))
-        
-        #print("HEEEEEEEEY")
-       
-        if data['type'] == 'rgb':
-            #print("rgb")
-            #print(images)
 
+        #print("WHAT TYPE AM I?")
+        #print(data['type'])
+
+        if data['type'] == 'rgb':
+            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
+                                        perturb=True, force_all_rays=False, datatype=data['type'],
+                                         max_depth=None, **vars(self.opt))
+
+            pred_rgb = outputs['image']
             loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
+
         elif data['type'] == 'depth':
-        
-            d = images.device
-            t = images.dtype    
-            #rgb = torch.zeros((images.shape[0],images.shape[1],4)).to(d,t)
-            rgb = torch.cat((images,torch.zeros(images.shape).to(d,t),torch.zeros(images.shape).to(d,t),torch.zeros(images.shape).to(d,t)),axis=-1)
-            #print(rgb)
-            inds = torch.squeeze((images == 0),axis=-1) | torch.squeeze((images == 1),axis=-1)
-            #print("HO?")
-            #print(torch.squeeze((images == 0),axis=-1).nonzero().shape)
-            #print(torch.squeeze((images == 1),axis=-1).nonzero().shape)
-            #vals = rgb[non_zero_inds]
-            #vals[:,:3] = 0
-            #vals[:,3] = 1
-            #rgb[non_zero_inds] = vals
+            #print("ENTERED DEPTH")
+            #print(rays_o.shape)
+            #print(rays_d.shape)
+            #print(self.opt.depth_far)
+            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
+                                        perturb=True, force_all_rays=False, datatype=data['type'],
+                                         max_depth=self.opt.depth_far, **vars(self.opt))
 
             gt_rgb = torch.squeeze(gt_rgb,axis=-1)
             pred_depth = outputs['depth']
-            
-            #print("depth!")
-            #print(gt_rgb.reshape(1,-1))
-            #print(pred_depth.reshape(1,-1))
-            #print(torch.max(gt_rgb))
-            #print(torch.min(gt_rgb))
-            #print(torch.max(pred_depth))
-            #print(torch.min(pred_depth))
-            
-            #print("dvar")
-            #print(outputs['d_var'])
-            d_diff = torch.abs(gt_rgb - pred_depth)
-            d_var = outputs['d_var']
-            #zero_loss = torch.zeros(d_diff.shape).to(d,t)
+            #print("CHECKING NETWORK RESULT")
+            #print(gt_rgb)
+            #print(" ")
+            #print(pred_depth)
             l2 = torch.nn.MSELoss()
             l1 = torch.nn.L1Loss()
-            depth_loss = l2(pred_depth,gt_rgb) #torch.mean((d_diff/torch.sqrt(d_var)))
-            #print("l1 : " + str(l1(pred_depth,gt_rgb).detach().cpu().numpy()))
-            #f = torch.nn.GaussianNLLLoss(eps=0.001)
-            #cond = (d_diff - torch.sqrt(d_var)) > 0
-            #print(pred_depth.shape)
-            #print(gt_rgb.shape)
-            #print(d_var.shape)
-            #print(pred_depth[cond].shape)
-            #print(gt_rgb[cond].shape)
-            #print(d_var[cond].shape)
-            #depth_loss = torch.mean(f(pred_depth[cond], gt_rgb[cond], d_var[cond]))
+            depth_loss = l1(pred_depth,gt_rgb)
+            loss = depth_loss
 
-            bg_color = torch.rand_like(rgb[..., :3]) # [N, 3], pixel-wise random.
-            gt = rgb[..., :3] * rgb[..., 3:] + bg_color * (1 - rgb[..., 3:])
-            
-            gt_zeros = gt[inds]
-            pred_rgb = outputs['image'][inds]
-            
-            loss = depth_loss #+ torch.max(torch.abs(pred_rgb-gt_zeros),dim=-1)[0].mean()
-            #print(rgb.shape)
-            #print(pred_rgb.shape)
-            #loss = torch.max(torch.abs(outputs['image']-rgb),dim=-1)[0].mean()
-            #print("loss")
-            #print(loss)
-            #print("predicted depth")
-            #print(torch.flatten(pred_depth)[0:5])
-            #print("ground truth depth")
-            #print(torch.flatten(gt_rgb)[0:5])
-            
-            #print(torch.max(outputs['depth']))
-            #print(torch.min(outputs['depth']))
-            #print(torch.max(gt_rgb))
-            #print(torch.min(gt_rgb))
-            #print(" ")
-            #print(loss)
-            #print(loss)
-            #print("predicted")
-            #print(torch.squeeze(pred_depth))
-            #print("ground truth")
-            #print(torch.squeeze(gt_rgb))
-            #print(torch.max(pred_depth))
-            #print(torch.min(pred_depth))
-            #print(torch.max(gt_rgb))
-            #print(torch.min(gt_rgb))
-            #print(gt_rgb.shape)
-            #print(pred_depth.shape)
-            #loss = torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
+            pred_rgb = outputs['image']
 
-        elif self.opt.image_type == 'touch':
-            print("not implemented touch yet!")
-            exit()
+        elif data['type'] == 'touch':
+            # print("ENTERED CORRECT LOCATION")
+            # print(rays_o.shape)
+            # print(rays_d.shape)
+            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
+                                        perturb=True, force_all_rays=False, datatype=data['type'],
+                                         max_depth=self.opt.touch_far, **vars(self.opt))
 
-        #l1 = nn.L1Loss()
-        #loss = l1(pred_rgb,gt_rgb)
-        #print(loss.shape)
-        
-        #print("")
-        #print(torch.squeeze(gt_rgb))
-        #print(torch.squeeze(pred_depth))
-        #print(torch.max(gt_rgb))
-        #print(torch.min(gt_rgb))
-        #print(loss.item())
-        #print("")
-        #print(torch.min(torch.unsqueeze(pred_rgb,dim=-1)))
-        #print("")
+            gt_rgb = torch.squeeze(gt_rgb,axis=-1)
+            pred_depth = outputs['depth']
+            l2 = torch.nn.MSELoss()
+            l1 = torch.nn.L1Loss()
+            #print("vals")
+            #print(pred_depth[gt_rgb<self.opt.touch_far].shape)
+            touch_loss = l1(pred_depth[gt_rgb<self.opt.touch_far],gt_rgb[gt_rgb<self.opt.touch_far])
+            #print("CHECK VALUES")
+            #print(touch_loss)
+            #print(pred_depth)
+            #print(gt_rgb)
+            loss = touch_loss
+
+            pred_rgb = outputs['image']
+            # print("not implemented touch yet!")
+           
 
         # special case for CCNeRF's rank-residual training
         if len(loss.shape) == 3: # [K, B, N]
@@ -641,7 +726,15 @@ class Trainer(object):
         else:
             gt_rgb = images
         
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, **vars(self.opt))
+        if data['type'] == 'rgb':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+                                        datatype=data['type'], max_depth=self.opt.depth_far, **vars(self.opt))
+        elif data['type'] == 'depth':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+                                        datatype=data['type'], max_depth=self.opt.depth_far, **vars(self.opt))
+        elif data['type'] == 'touch':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+                                        datatype=data['type'], max_depth=self.opt.touch_far, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)
@@ -660,7 +753,19 @@ class Trainer(object):
         if bg_color is not None:
             bg_color = bg_color.to(self.device)
 
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=perturb, **vars(self.opt))
+        #print(data['type'])
+        if data['type'] == 'rgb':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+                                        perturb=perturb, datatype=data['type'], 
+                                        max_depth = self.opt.depth_far, **vars(self.opt))
+        elif data['type'] == 'depth':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+                                        perturb=perturb, datatype=data['type'], 
+                                        max_depth = self.opt.depth_far, **vars(self.opt))
+        elif data['type'] == 'touch':
+            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+                                        perturb=perturb, datatype=data['type'], 
+                                        max_depth = self.opt.touch_far, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
@@ -808,7 +913,11 @@ class Trainer(object):
 
         for _ in range(step):
             
+            # print(loader)
             data = next(loader)
+            # print("HMMMMMMM")
+            # print(data)
+            # print("HI")
             # mimic an infinite loop dataloader (in case the total dataset is smaller than step)
             #try:
             #    data = next(loader)
@@ -864,7 +973,7 @@ class Trainer(object):
 
     
     # [GUI] test on a single image
-    def test_gui(self, pose, intrinsics, W, H, bg_color=None, spp=1, downscale=1):
+    def test_gui(self, pose, intrinsics, W, H, datatype, bg_color=None, spp=1, downscale=1):
         
         # render resolution (may need downscale to for better frame rate)
         rH = int(H * downscale)
@@ -875,7 +984,18 @@ class Trainer(object):
 
         rays = get_rays(pose, intrinsics, rH, rW, -1)
 
+        # print(pose)
+        # print(intrinsics)
+        # print(W)
+        # print(H)
+        # print(datatype)
+        # print(bg_color)
+        # print(spp)
+        # print(downscale)
+
+
         data = {
+            'type': datatype,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
             'H': rH,

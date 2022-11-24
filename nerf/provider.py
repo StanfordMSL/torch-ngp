@@ -51,8 +51,8 @@ def visualize_poses(poses, size=0.1):
         segs = trimesh.load_path(segs)
         objects.append(segs)
     
-    sphere = trimesh.primitives.Sphere(radius=1, center=(0,0,0))
-    objects.append(sphere)
+    # sphere = trimesh.primitives.Sphere(radius=1, center=(0,0,0))
+    # objects.append(sphere)
     trimesh.Scene(objects).show()
 
 
@@ -213,8 +213,8 @@ class NeRFDataset:
             self.images = []
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
-                print("color")
-                print(f_path)
+                #print("color")
+                #print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
                 if self.mode == 'blender' and '.' not in os.path.basename(f_path):
                     f_path += '.png' # so silly...
@@ -313,7 +313,7 @@ class NeRFDataset:
             s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
             rH, rW = int(self.H / s), int(self.W / s)
             rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
-            print("OH NO")
+            #print("OH NO")
             return {
                 'type': 'rgb',
                 'camera_angle_x':self.config['camera_angle_x'],
@@ -348,6 +348,11 @@ class NeRFDataset:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
             if self.training:
                 C = images.shape[-1]
+                #print("COLOR CHECK")
+                #print(C)
+                #print(images.shape)
+                #print(rays['inds'])
+                #print(torch.stack(C * [rays['inds']], -1))
                 images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
             results['images'] = images
         
@@ -356,7 +361,7 @@ class NeRFDataset:
             results['index'] = index
             results['inds_coarse'] = rays['inds_coarse']
             
-        print("HELLO")
+        #print("HELLO")
         return results
 
     def dataloader(self):
@@ -394,16 +399,14 @@ class NeRFDepthDataset:
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
-
+        self.depth_near = self.opt.depth_near # specifies the near plane (in meters) of the depth camera
+        self.depth_far = self.opt.depth_far # specifies the far plane (in meters) of the depth camera
         self.rand_pose = opt.rand_pose
 
         self.use_original = False
         
         if not self.use_original:
             self.root_path = os.path.join(self.root_path, 'depth')
-
-        print("root path!")
-        print(self.root_path)
 
         # auto-detect transforms.json and split mode.
         if os.path.exists(os.path.join(self.root_path, 'transforms.json')):
@@ -493,8 +496,8 @@ class NeRFDepthDataset:
             #print("HEY")
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path']+'.png')
-                print("depth path")
-                print(f_path)
+                #print("depth path")
+                #print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
                 
                 # there are non-exist paths in fox...
@@ -508,11 +511,10 @@ class NeRFDepthDataset:
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
                 
                 # convert images into raw distance based on camera intrinics
-                z_max = 10
-                z_min = 0.01
-                image = image.astype(np.float32) / (255.)*(z_max - z_min) + z_min # [H, W, 3/4]
-                print(image)
+                image = image.astype(np.float32) / (255.)*(self.depth_far - self.depth_near) + self.depth_near # [H, W, 3/4]
+                #print(image)
                 
+  
                 #image = image.astype(np.float32)/ (255.)# [H, W, 3/4]
                 #plt.imshow(image)
                 #plt.show()
@@ -545,8 +547,11 @@ class NeRFDepthDataset:
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+            #print(self.images.shape)
+            
             self.images = torch.unsqueeze(self.images,dim=-1)
-
+            #print(self.images.shape)
+            # stop
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
         #print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
@@ -558,7 +563,7 @@ class NeRFDepthDataset:
             self.error_map = None
 
         # [debug] uncomment to view all training poses.
-        #visualize_poses(self.poses.numpy())
+        visualize_poses(self.poses.numpy())
 
         # [debug] uncomment to view examples of randomly generated poses.
         #visualize_poses(rand_poses(100, self.device, radius=self.radius).cpu().numpy())
@@ -635,6 +640,11 @@ class NeRFDepthDataset:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
             if self.training:
                 C = images.shape[-1]
+                #print("DEPTH CHECK")
+                #print(C)
+                #print(images.shape)
+                #print(rays['inds'])
+                #print(torch.stack(C * [rays['inds']], -1))
                 images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
             results['images'] = images
 
@@ -674,6 +684,9 @@ class NeRFTouchDataset:
         self.offset = opt.offset # camera offset
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
         self.fp16 = opt.fp16 # if preload, load into fp16.
+        
+        self.touch_near = self.opt.touch_near # specifies the near plane (in meters) of the depth camera
+        self.touch_far = self.opt.touch_far # specifies the far plane (in meters) of the depth camera
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
@@ -688,6 +701,8 @@ class NeRFTouchDataset:
         # auto-detect transforms.json and split mode.
         if os.path.exists(os.path.join(self.root_path, 'transforms.json')):
             self.mode = 'colmap' # manually split, use view-interpolation for test.
+        elif os.path.exists(os.path.join(self.root_path, 'transforms_train.json')):
+            self.mode = 'blender' # provided split
         else:
             raise NotImplementedError(f'[NeRFDataset] Cannot find touch/transforms*.json under {self.root_path}')
 
@@ -695,6 +710,29 @@ class NeRFTouchDataset:
         if self.mode == 'colmap':
             with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f:
                 transform = json.load(f)
+        elif self.mode == 'blender':
+            # load all splits (train/valid/test), this is what instant-ngp in fact does...
+            if type == 'all':
+                transform_paths = glob.glob(os.path.join(self.root_path, '*.json'))
+                transform = None
+                for transform_path in transform_paths:
+                    with open(transform_path, 'r') as f:
+                        tmp_transform = json.load(f)
+                        if transform is None:
+                            transform = tmp_transform
+                        else:
+                            transform['frames'].extend(tmp_transform['frames'])
+            # load train and val split
+            elif type == 'trainval':
+                with open(os.path.join(self.root_path, f'transforms_train.json'), 'r') as f:
+                    transform = json.load(f)
+                with open(os.path.join(self.root_path, f'transforms_val.json'), 'r') as f:
+                    transform_val = json.load(f)
+                transform['frames'].extend(transform_val['frames'])
+            # only load one specified split
+            else:
+                with open(os.path.join(self.root_path, f'transforms_{type}.json'), 'r') as f:
+                    transform = json.load(f)
         else:
             raise NotImplementedError(f'unknown dataset mode: {self.mode}')
 
@@ -707,8 +745,8 @@ class NeRFTouchDataset:
             self.H = self.W = None
         
         # read images
-        max_depth = transform['camera_max_depth']
-        min_depth = transform['camera_min_depth']
+        #max_depth = transform['camera_max_depth']
+        #min_depth = transform['camera_min_depth']
         
         frames = transform["frames"]
         #frames = sorted(frames, key=lambda d: d['file_path']) # why do I sort...
@@ -744,7 +782,8 @@ class NeRFTouchDataset:
             self.poses = []
             self.images = []
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path'])
+                f_path = os.path.join(self.root_path, f['file_path']+'.png')
+                print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
 
                 # there are non-exist paths in fox...
@@ -762,7 +801,11 @@ class NeRFTouchDataset:
                 if image.shape[0] != self.H or image.shape[1] != self.W:
                     image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
                     
-                image = image.astype(np.float32) / 255 # [H, W, 3/4]
+                # convert images into raw distance based on camera intrinics
+                image = image.astype(np.float32) / (255.)*(self.touch_far - self.touch_near) + self.touch_near # [H, W, 3/4]
+                print(image)
+                #print(image)
+                #image = image.astype(np.float32) / 255 # [H, W, 3/4]
 
                 self.poses.append(pose)
                 self.images.append(image)
@@ -770,6 +813,7 @@ class NeRFTouchDataset:
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+            self.images = torch.unsqueeze(self.images,dim=-1)
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -817,9 +861,8 @@ class NeRFTouchDataset:
     
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
-
     def collate(self, index):
-
+        print("OMOMOMOM")
         B = len(index) # a list of length 1
 
         # random pose without gt images.
@@ -830,21 +873,22 @@ class NeRFTouchDataset:
             # sample a low-resolution but full image for CLIP
             s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
             rH, rW = int(self.H / s), int(self.W / s)
-            rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
+            rays = get_rays(poses, self.intrinsics / s, rH, rW, -1, camera_model='touch')
 
             return {
                 'type': 'touch',
                 'H': rH,
                 'W': rW,
                 'rays_o': rays['rays_o'],
-                'rays_d': rays['rays_d'],    
+                'rays_d': rays['rays_d'],
+                'mask': rays['mask']    
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
         
-        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
+        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, 'touch')
         
         results = {
             'type': 'touch',
@@ -852,12 +896,18 @@ class NeRFTouchDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
+            'mask': rays['mask']
         }
 
         if self.images is not None:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
             if self.training:
                 C = images.shape[-1]
+                #print("ERROR HERE")
+                #print(C)
+                #print(rays['inds'])
+                #print(images.shape)
+                #print(torch.stack(C * [rays['inds']], -1))
                 images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
             results['images'] = images
         
@@ -875,4 +925,5 @@ class NeRFTouchDataset:
         loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
         loader.has_gt = self.images is not None
+        #print("OOOOAAA")
         return loader

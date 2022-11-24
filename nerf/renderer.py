@@ -122,7 +122,9 @@ class NeRFRenderer(nn.Module):
         self.mean_count = 0
         self.local_step = 0
 
-    def run(self, rays_o, rays_d, num_steps=128, upsample_steps=128, bg_color=None, perturb=False, **kwargs):
+    def run(self, rays_o, rays_d, num_steps=128, upsample_steps=128, 
+            bg_color=None, perturb=False, datatype='rgb',
+            max_depth=5, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # bg_color: [3] in range [0, 1]
         # return: image: [B, N, 3], depth: [B, N]
@@ -224,12 +226,17 @@ class NeRFRenderer(nn.Module):
         
         # calculate depth 
         ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
-        #depth = torch.sum(weights * ori_z_vals, dim=-1)
-        #d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-ori_z_vals), dim=-1) + 1e-5
-        depth = torch.sum(weights * z_vals, dim=-1)
-        max_depth = 10
-        depth = depth + (1-weights_sum)*max_depth
-        d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-z_vals), dim=-1) + 1e-5
+        
+        if datatype == 'rgb':
+            depth = torch.sum(weights * ori_z_vals, dim=-1)
+            d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-ori_z_vals), dim=-1) + 1e-5
+        else:
+            depth = torch.sum(weights * z_vals, dim=-1)
+            depth = depth + (1-weights_sum)*max_depth
+            #print("CHECK MAX DEPTH")
+            #print(max_depth)
+            #print(depth)
+            d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-z_vals), dim=-1) + 1e-5
         
         #print("SHAPES")
         #print(ori_z_vals.shape)
@@ -273,7 +280,9 @@ class NeRFRenderer(nn.Module):
         }
 
 
-    def run_cuda(self, rays_o, rays_d, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, **kwargs):
+    def run_cuda(self, rays_o, rays_d, dt_gamma=0, 
+                 bg_color=None, perturb=False, force_all_rays=False, 
+                 max_steps=1024, datatype='rgb', max_depth=5, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: image: [B, N, 3], depth: [B, N]
 
@@ -584,7 +593,8 @@ class NeRFRenderer(nn.Module):
         #print(f'[density grid] min={self.density_grid.min().item():.4f}, max={self.density_grid.max().item():.4f}, mean={self.mean_density:.4f}, occ_rate={(self.density_grid > 0.01).sum() / (128**3 * self.cascade):.3f} | [step counter] mean={self.mean_count}')
 
 
-    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, **kwargs):
+    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, 
+               datatype='rgb', max_depth=5, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: pred_rgb: [B, N, 3]
 
@@ -611,7 +621,8 @@ class NeRFRenderer(nn.Module):
                 head = 0
                 while head < N:
                     tail = min(head + max_ray_batch, N)
-                    results_ = _run(rays_o[b:b+1, head:tail], rays_d[b:b+1, head:tail], **kwargs)
+                    results_ = _run(rays_o[b:b+1, head:tail], rays_d[b:b+1, head:tail],
+                                    datatype=datatype, max_depth=max_depth, **kwargs)
                     depth[b:b+1, head:tail] = results_['depth']
                     image[b:b+1, head:tail] = results_['image']
                     head += max_ray_batch
@@ -621,6 +632,7 @@ class NeRFRenderer(nn.Module):
             results['image'] = image
 
         else:
-            results = _run(rays_o, rays_d, **kwargs)
+            results = _run(rays_o, rays_d, datatype=datatype,
+                           max_depth=max_depth, **kwargs)
 
         return results

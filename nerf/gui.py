@@ -129,7 +129,9 @@ class NeRFGUI:
             starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             starter.record()
 
-            outputs = self.trainer.test_gui(self.cam.pose, self.cam.intrinsics, self.W, self.H, self.bg_color, self.spp, self.downscale)
+            outputs = self.trainer.test_gui(self.cam.pose, self.cam.intrinsics, 
+                                            self.W, self.H, 'rgb',
+                                            self.bg_color, self.spp, self.downscale)
 
             ender.record()
             torch.cuda.synchronize()

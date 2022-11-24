@@ -4,6 +4,7 @@ import argparse
 
 from nerf.provider import NeRFDataset
 from nerf.provider import NeRFDepthDataset
+from nerf.provider import NeRFTouchDataset
 from nerf.gui import NeRFGUI
 from nerf.utils import *
 
@@ -51,6 +52,10 @@ if __name__ == '__main__':
     parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
     parser.add_argument('--density_thresh', type=float, default=10, help="threshold for density grid to be occupied")
     parser.add_argument('--bg_radius', type=float, default=-1, help="if positive, use a background model at sphere(bg_radius)")
+    parser.add_argument('--depth_near', type=float, default=.01, help="sets near plane for depth camera default is 0.01 meters")
+    parser.add_argument('--depth_far', type=float, default=5, help="sets far plane for depth camera default is 5 meters")
+    parser.add_argument('--touch_near', type=float, default=0.000001, help="sets near plane for depth camera default is 0.00001 meters")
+    parser.add_argument('--touch_far', type=float, default=.25, help="sets far plane for depth camera default is .25 meters")
 
     ### GUI options
     parser.add_argument('--gui', action='store_true', help="start a GUI")
@@ -97,7 +102,7 @@ if __name__ == '__main__':
         bg_radius=opt.bg_radius,
     )
     
-    print(model)
+    #print(model)
 
     #criterion = torch.nn.L1Loss()
     criterion = torch.nn.MSELoss(reduction='none')
@@ -123,8 +128,7 @@ if __name__ == '__main__':
             if 'depth' in opt.image_type:
                 test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
             if 'touch' in opt.image_type:
-                print("not yet implemented!")
-                pass
+                test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
 
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
@@ -143,8 +147,7 @@ if __name__ == '__main__':
         if 'depth' in opt.image_type:
             train_loader.append(NeRFDepthDataset(opt, device=device, type='train').dataloader())
         if 'touch' in opt.image_type:
-            print("not yet implemented!")
-            exit()
+            train_loader.append(NeRFTouchDataset(opt, device=device, type='train').dataloader())
 
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
@@ -165,8 +168,7 @@ if __name__ == '__main__':
             if 'depth' in opt.image_type:
                 valid_loader.append(NeRFDepthDataset(opt, device=device, type='val', downscale=1).dataloader())
             if 'touch' in opt.image_type:
-                print("not yet implemented!")
-                exit()
+                valid_loader.append(NeRFTouchDataset(opt, device=device, type='val', downscale=1).dataloader())
             
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
@@ -178,8 +180,7 @@ if __name__ == '__main__':
             if 'depth' in opt.image_type:
                 test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
             if 'touch' in opt.image_type:
-                print("not yet implemented!")
-                exit()
+                test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
 
             
             if test_loader[0].has_gt:
