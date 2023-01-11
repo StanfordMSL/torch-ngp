@@ -166,7 +166,20 @@ class NeRFDataset:
         else:
             raise NotImplementedError(f'unknown dataset mode: {self.mode}')
 
-        self.config = transform 
+        self.config = transform
+
+        if 'near' in transform:
+            self.near =  float(transform['near'])
+        else:
+            self.near = 1e-6
+
+        if 'far' in transform:
+            self.far = float(transform['far'])
+        else:
+            self.far = 1.e9
+
+        print("FAR IS: ", self.far)
+        print("NEAR IS: ", self.near)
 
         # load image size
         if 'h' in transform and 'w' in transform:
@@ -297,6 +310,10 @@ class NeRFDataset:
         cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
         cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
     
+        print("intrinics")
+        print("fl_x: " , fl_x)
+        print("cx: " , cx)
+        print("cy: " , cy)
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
 
@@ -321,7 +338,9 @@ class NeRFDataset:
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'], 
-                'poses':poses   
+                'poses':poses,
+                'near': self.near,
+                'far': self.far   
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
@@ -341,7 +360,9 @@ class NeRFDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            'poses':self.val_poses[index].to(self.device)
+            'poses':self.val_poses[index].to(self.device),
+            'near': self.near,
+            'far': self.far
         }
 
         if self.images is not None:
@@ -399,8 +420,8 @@ class NeRFDepthDataset:
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
-        self.depth_near = self.opt.depth_near # specifies the near plane (in meters) of the depth camera
-        self.depth_far = self.opt.depth_far # specifies the far plane (in meters) of the depth camera
+        # self.depth_near = self.opt.depth_near # specifies the near plane (in meters) of the depth camera
+        # self.depth_far = self.opt.depth_far # specifies the far plane (in meters) of the depth camera
         self.rand_pose = opt.rand_pose
 
         self.use_original = False
@@ -448,6 +469,19 @@ class NeRFDepthDataset:
             raise NotImplementedError(f'unknown dataset mode: {self.mode}')
 
         self.config = transform 
+
+        if 'near' in transform:
+            self.near =  float(transform['near'])
+        else:
+            self.near = 1e-6
+
+        if 'far' in transform:
+            self.far = float(transform['far'])
+        else:
+            self.far = 1.e9
+
+        print("FAR IS: ", self.far)
+        print("NEAR IS: ", self.near)
 
         # load image size
         if 'h' in transform and 'w' in transform:
@@ -511,7 +545,7 @@ class NeRFDepthDataset:
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
                 
                 # convert images into raw distance based on camera intrinics
-                image = image.astype(np.float32) / (255.)*(self.depth_far - self.depth_near) + self.depth_near # [H, W, 3/4]
+                image = image.astype(np.float32) / (255.)*(self.far - self.near) + self.near # [H, W, 3/4]
                 #print(image)
                 
   
@@ -620,6 +654,8 @@ class NeRFDepthDataset:
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'],
+                'near': self.near,
+                'far': self.far
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
@@ -634,6 +670,8 @@ class NeRFDepthDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
+            'near': self.near,
+            'far': self.far
         }
 
         if self.images is not None:
@@ -685,8 +723,8 @@ class NeRFTouchDataset:
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
         self.fp16 = opt.fp16 # if preload, load into fp16.
         
-        self.touch_near = self.opt.touch_near # specifies the near plane (in meters) of the depth camera
-        self.touch_far = self.opt.touch_far # specifies the far plane (in meters) of the depth camera
+        # self.touch_near = self.opt.touch_near # specifies the near plane (in meters) of the depth camera
+        # self.touch_far = self.opt.touch_far # specifies the far plane (in meters) of the depth camera
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
@@ -735,6 +773,21 @@ class NeRFTouchDataset:
                     transform = json.load(f)
         else:
             raise NotImplementedError(f'unknown dataset mode: {self.mode}')
+
+        self.config = transform 
+
+        if 'near' in transform:
+            self.near =  float(transform['near'])
+        else:
+            self.near = 1e-6
+
+        if 'far' in transform:
+            self.far = float(transform['far'])
+        else:
+            self.far = 1.e9
+
+        print("FAR IS: ", self.far)
+        print("NEAR IS: ", self.near)
 
         # load image size
         if 'h' in transform and 'w' in transform:
@@ -881,7 +934,9 @@ class NeRFTouchDataset:
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'],
-                'mask': rays['mask']    
+                'mask': rays['mask'],
+                'near': self.near,
+                'far': self.far    
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
@@ -896,7 +951,9 @@ class NeRFTouchDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            'mask': rays['mask']
+            'mask': rays['mask'],
+            'near': self.near,
+            'far': self.far
         }
 
         if self.images is not None:

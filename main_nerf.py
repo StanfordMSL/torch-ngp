@@ -19,13 +19,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('path', type=str)
     parser.add_argument('-O', action='store_true', help="equals --fp16 --cuda_ray --preload")
-    parser.add_argument('--test', action='store_true', help="test mode")
+    # parser.add_argument('--test', action='store_true', help="test mode")
+    parser.add_argument('--mode', type=str, default='train')
     parser.add_argument('--workspace', type=str, default='workspace')
     parser.add_argument('--seed', type=int, default=0)
 
     ### training options
     parser.add_argument('--iters', type=int, default=30000, help="training iters")
-    parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
+    parser.add_argument('--lr', type=float, default=1e-3, help="initial learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--num_rays', type=int, default=4096, help="num rays sampled per image for each training step")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
@@ -49,13 +50,14 @@ if __name__ == '__main__':
     parser.add_argument('--scale', type=float, default=0.33, help="scale camera location into box[-bound, bound]^3")
     parser.add_argument('--offset', type=float, nargs='*', default=[0, 0, 0], help="offset of camera location")
     parser.add_argument('--dt_gamma', type=float, default=1/128, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
-    parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
+    # parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
+    # parser.add_argument('--max_far', type=float, default=100, help="maximum far distance for camera")
     parser.add_argument('--density_thresh', type=float, default=10, help="threshold for density grid to be occupied")
     parser.add_argument('--bg_radius', type=float, default=-1, help="if positive, use a background model at sphere(bg_radius)")
-    parser.add_argument('--depth_near', type=float, default=.01, help="sets near plane for depth camera default is 0.01 meters")
-    parser.add_argument('--depth_far', type=float, default=5, help="sets far plane for depth camera default is 5 meters")
-    parser.add_argument('--touch_near', type=float, default=0.000001, help="sets near plane for depth camera default is 0.00001 meters")
-    parser.add_argument('--touch_far', type=float, default=.25, help="sets far plane for depth camera default is .25 meters")
+    # parser.add_argument('--depth_near', type=float, default=.01, help="sets near plane for depth camera default is 0.01 meters")
+    # parser.add_argument('--depth_far', type=float, default=5, help="sets far plane for depth camera default is 5 meters")
+    # parser.add_argument('--touch_near', type=float, default=0.000001, help="sets near plane for depth camera default is 0.00001 meters")
+    # parser.add_argument('--touch_far', type=float, default=.25, help="sets far plane for depth camera default is .25 meters")
 
     ### GUI options
     parser.add_argument('--gui', action='store_true', help="start a GUI")
@@ -88,104 +90,212 @@ if __name__ == '__main__':
     else:
         from nerf.network import NeRFNetwork
 
+    
     print(opt)
     print(opt.image_type)
     seed_everything(opt.seed)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # load data either training or test depending on what mode is set to
+    loaders = []
+    if 'color' in opt.image_type:
+        loaders.append(NeRFDataset(opt, device=device, type=opt.mode).dataloader())
+    if 'depth' in opt.image_type:
+        loaders.append(NeRFDepthDataset(opt, device=device, type=opt.mode).dataloader())
+    if 'touch' in opt.image_type:
+        loaders.append(NeRFTouchDataset(opt, device=device, type=opt.mode).dataloader())
+    
+    # if not using gui load in validation and test data for metrics testing
+    val_loaders = []
+    tst_loaders = []
+    if not opt.gui:
+        if 'color' in opt.image_type:
+            tst_loaders.append(NeRFDataset(opt, device=device, type='test', downscale=1).dataloader())
+            val_loaders.append(NeRFDataset(opt, device=device, type='val', downscale=1).dataloader())
+        if 'depth' in opt.image_type:
+            tst_loaders.append(NeRFDepthDataset(opt, device=device, type='test', downscale=1).dataloader())
+            val_loaders.append(NeRFDepthDataset(opt, device=device, type='val', downscale=1).dataloader())
+        if 'touch' in opt.image_type:
+            tst_loaders.append(NeRFTouchDataset(opt, device=device, type='test', downscale=1).dataloader())
+            val_loaders.append(NeRFTouchDataset(opt, device=device, type='val', downscale=1).dataloader())
+
+
+    # # get closest near plane to help define the hashgrid for nerf training
+    # min_val = torch.inf
+    # for loader in loaders + val_loaders:
+    #     if loader._data.near < min_val:
+    #         min_val = loader._data.near
 
     model = NeRFNetwork(
         encoding="hashgrid",
         bound=opt.bound,
         cuda_ray=opt.cuda_ray,
         density_scale=1,
-        min_near=opt.min_near,
+        # min_near=min_val,
         density_thresh=opt.density_thresh,
         bg_radius=opt.bg_radius,
     )
     
-    #print(model)
+    print(model)
 
     #criterion = torch.nn.L1Loss()
     criterion = torch.nn.MSELoss(reduction='none')
     #criterion = partial(huber_loss, reduction='none')
     #criterion = torch.nn.HuberLoss(reduction='none', beta=0.1) # only available after torch 1.10 ?
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-   
-    # if doing test
-    if opt.test:
+    trainer = None
 
+    if opt.mode == 'test':
         trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt)
-
-        if opt.gui:
-            gui = NeRFGUI(opt, trainer)
-            gui.render()
-        
-        else:
-
-            test_loader = []
-            if 'color' in opt.image_type:
-                test_loader.append(NeRFDataset(opt, device=device, type='test').dataloader())
-            if 'depth' in opt.image_type:
-                test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
-            if 'touch' in opt.image_type:
-                test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
-
-            if test_loader.has_gt:
-                trainer.evaluate(test_loader) # blender has gt, so evaluate it.
-            else:
-                trainer.test(test_loader) # colmap doesn't have gt, so just test.
-            
-            #trainer.save_mesh(resolution=256, threshold=10)
     
-    else:
-
+    elif opt.mode == 'train':
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-
-        train_loader = []
-        if 'color' in opt.image_type:
-            train_loader.append(NeRFDataset(opt, device=device, type='train').dataloader())
-        if 'depth' in opt.image_type:
-            train_loader.append(NeRFDepthDataset(opt, device=device, type='train').dataloader())
-        if 'touch' in opt.image_type:
-            train_loader.append(NeRFTouchDataset(opt, device=device, type='train').dataloader())
-
-        # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
-        
+
         trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, 
                           optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, 
                           lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=[PSNRMeter()], 
                           use_checkpoint=opt.ckpt, eval_interval=50)
+    else:
+        print("incorrect mode given! Exiting...")
+        exit()
 
-        if opt.gui:
-            gui = NeRFGUI(opt, trainer, train_loader)
+    if opt.gui:
+        if opt.mode == 'test':
+            gui = NeRFGUI(opt, trainer)
             gui.render()
-        
-        else:
-            valid_loader = []
-            if 'color' in opt.image_type:
-                valid_loader.append(NeRFDataset(opt, device=device, type='val', downscale=1).dataloader())
-            if 'depth' in opt.image_type:
-                valid_loader.append(NeRFDepthDataset(opt, device=device, type='val', downscale=1).dataloader())
-            if 'touch' in opt.image_type:
-                valid_loader.append(NeRFTouchDataset(opt, device=device, type='val', downscale=1).dataloader())
-            
-            max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
-            trainer.train(train_loader, valid_loader, max_epoch)
-
-            # also test
-            test_loader = []
-            if 'color' in opt.image_type:
-                test_loader.append( NeRFDataset(opt, device=device, type='test').dataloader())
-            if 'depth' in opt.image_type:
-                test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
-            if 'touch' in opt.image_type:
-                test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
-
-            
-            if test_loader[0].has_gt:
-                trainer.evaluate(test_loader) # blender has gt, so evaluate it.
+        elif opt.mode == 'train':
+            gui = NeRFGUI(opt, trainer, loaders)
+            gui.render()
+    else:
+        if opt.mode == 'test':
+            if loaders[0].has_gt:
+                trainer.evaluate(loaders) # blender has gt, so evaluate it.
             else:
-                trainer.test(test_loader) # colmap doesn't have gt, so just test.
+                trainer.test(loaders) # colmap doesn't have gt, so just test.
             
-            #trainer.save_mesh(resolution=256, threshold=10)
+            trainer.save_mesh(resolution=256, threshold=10)
+
+        elif opt.mode == 'train':
+            max_epoch = np.ceil(opt.iters / len(loaders)).astype(np.int32)
+            trainer.train(loaders, val_loaders, max_epoch)
+
+            if tst_loaders[0].has_gt:
+                trainer.evaluate(tst_loaders) # blender has gt, so evaluate it.
+            else:
+                trainer.test(tst_loaders) # colmap doesn't have gt, so just test.
+            
+            trainer.save_mesh(resolution=256, threshold=10)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+   
+    # # if doing test
+    # if opt.test:
+
+    #     trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt)
+
+    #     if opt.gui:
+    #         gui = NeRFGUI(opt, trainer)
+    #         gui.render()
+        
+    #     else:
+
+    #         test_loader = []
+    #         if 'color' in opt.image_type:
+    #             test_loader.append(NeRFDataset(opt, device=device, type='test').dataloader())
+    #         if 'depth' in opt.image_type:
+    #             test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
+    #         if 'touch' in opt.image_type:
+    #             test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
+
+    #         if test_loader.has_gt:
+    #             trainer.evaluate(test_loader) # blender has gt, so evaluate it.
+    #         else:
+    #             trainer.test(test_loader) # colmap doesn't have gt, so just test.
+            
+    #         #trainer.save_mesh(resolution=256, threshold=10)
+    
+    # else:
+
+    #     optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
+
+    #     train_loader = []
+    #     if 'color' in opt.image_type:
+    #         train_loader.append(NeRFDataset(opt, device=device, type='train').dataloader())
+    #     if 'depth' in opt.image_type:
+    #         train_loader.append(NeRFDepthDataset(opt, device=device, type='train').dataloader())
+    #     if 'touch' in opt.image_type:
+    #         train_loader.append(NeRFTouchDataset(opt, device=device, type='train').dataloader())
+
+    #     # decay to 0.1 * init_lr at last iter step
+    #     scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
+        
+    #     trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, 
+    #                       optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, 
+    #                       lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=[PSNRMeter()], 
+    #                       use_checkpoint=opt.ckpt, eval_interval=50)
+
+    #     if opt.gui:
+    #         gui = NeRFGUI(opt, trainer, train_loader)
+    #         gui.render()
+        
+    #     else:
+    #         valid_loader = []
+    #         if 'color' in opt.image_type:
+    #             valid_loader.append(NeRFDataset(opt, device=device, type='val', downscale=1).dataloader())
+    #         if 'depth' in opt.image_type:
+    #             valid_loader.append(NeRFDepthDataset(opt, device=device, type='val', downscale=1).dataloader())
+    #         if 'touch' in opt.image_type:
+    #             valid_loader.append(NeRFTouchDataset(opt, device=device, type='val', downscale=1).dataloader())
+            
+    #         max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
+    #         trainer.train(train_loader, valid_loader, max_epoch)
+
+    #         # also test
+    #         test_loader = []
+    #         if 'color' in opt.image_type:
+    #             test_loader.append( NeRFDataset(opt, device=device, type='test').dataloader())
+    #         if 'depth' in opt.image_type:
+    #             test_loader.append(NeRFDepthDataset(opt, device=device, type='test').dataloader())
+    #         if 'touch' in opt.image_type:
+    #             test_loader.append(NeRFTouchDataset(opt, device=device, type='test').dataloader())
+
+            
+    #         if test_loader[0].has_gt:
+    #             trainer.evaluate(test_loader) # blender has gt, so evaluate it.
+    #         else:
+    #             trainer.test(test_loader) # colmap doesn't have gt, so just test.
+            
+    #         #trainer.save_mesh(resolution=256, threshold=10)

@@ -130,7 +130,7 @@ class NeRFGUI:
             starter.record()
 
             outputs = self.trainer.test_gui(self.cam.pose, self.cam.intrinsics, 
-                                            self.W, self.H, 'rgb',
+                                            self.W, self.H, 'viewer',
                                             self.bg_color, self.spp, self.downscale)
 
             ender.record()
@@ -189,7 +189,7 @@ class NeRFGUI:
                     dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 3, 3)
 
             # time
-            if not self.opt.test:
+            if not self.opt.mode == 'test':
                 with dpg.group(horizontal=True):
                     dpg.add_text("Train time: ")
                     dpg.add_text("no data", tag="_log_train_time")                    
@@ -203,7 +203,7 @@ class NeRFGUI:
                 dpg.add_text("1", tag="_log_spp")
 
             # train button
-            if not self.opt.test:
+            if not self.opt.mode == 'test':
                 with dpg.collapsing_header(label="Train", default_open=True):
 
                     # train / stop

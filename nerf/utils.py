@@ -562,18 +562,21 @@ class Trainer(object):
             H, W = data['H'], data['W']
 
             # currently fix white bg, MUST force all rays!
-            if data['type'] == 'rgb':
-                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
                                             perturb=True, force_all_rays=True, datatype=data['type'],
-                                            max_depth=self.opt.depth_far, **vars(self.opt))
-            elif data['type'] == 'depth':
-                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
-                                            perturb=True, force_all_rays=True, datatype=data['type'],
-                                            max_depth=self.opt.depth_far, **vars(self.opt))
-            elif data['type'] == 'touch':
-                outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
-                                            perturb=True, force_all_rays=True, datatype=data['type'],
-                                            max_depth=self.opt.touch_far, **vars(self.opt))
+                                            max_far=data['far'], min_near=data['near'], **vars(self.opt))
+            # if data['type'] == 'rgb':
+            #     outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+            #                                 perturb=True, force_all_rays=True, datatype=data['type'],
+            #                                 max_depth=data['type'], **vars(self.opt))
+            # elif data['type'] == 'depth':
+            #     outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+            #                                 perturb=True, force_all_rays=True, datatype=data['type'],
+            #                                 max_depth=data['type'], **vars(self.opt))
+            # elif data['type'] == 'touch':
+            #     outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
+            #                                 perturb=True, force_all_rays=True, datatype=data['type'],
+            #                                 max_depth=data['type'], **vars(self.opt))
 
 
 
@@ -595,6 +598,8 @@ class Trainer(object):
         images = data['images'] # [B, N, 3/4]
 
         B, N, C = images.shape
+        # print("C")
+        # print(C)
         
         if data['type'] == 'rgb':
             if self.opt.color_space == 'linear':
@@ -620,51 +625,57 @@ class Trainer(object):
         #print("WHAT TYPE AM I?")
         #print(data['type'])
 
-        if data['type'] == 'rgb':
-            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
-                                        perturb=True, force_all_rays=False, datatype=data['type'],
-                                         max_depth=None, **vars(self.opt))
+        #print(data['type'])
+        #print(data['far'])
+        #prirays_ont(data['near'])
 
+        
+
+        outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
+                                        perturb=True, force_all_rays=False, datatype=data['type'],
+                                         max_far=data['far'], min_near=data['near'], **vars(self.opt))
+
+        if data['type'] == 'rgb':
             pred_rgb = outputs['image']
-            loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
+            
+            l2 = torch.nn.MSELoss()
+            #var_loss = torch.mean(torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].unsqueeze(-1)/(outputs['image_var']+1e-10))
+            # print("predicted image")
+            # print(outputs['image'])
+            # print("gt image")
+            # print(gt_rgb)
+            loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean() #l2(pred_rgb,gt_rgb) #+ 1e-4*var_loss#torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
+            #print("CHECKING ELEMENTS")
+            #print(torch.any(torch.isnan(pred_rgb)))
+            #print(torch.any(torch.isinf(pred_rgb)))
+            #print(torch.any(torch.isnan(gt_rgb)))
+            #print(torch.any(torch.isinf(gt_rgb)))
+            #stop
+            # loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
 
         elif data['type'] == 'depth':
-            #print("ENTERED DEPTH")
-            #print(rays_o.shape)
-            #print(rays_d.shape)
-            #print(self.opt.depth_far)
-            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
-                                        perturb=True, force_all_rays=False, datatype=data['type'],
-                                         max_depth=self.opt.depth_far, **vars(self.opt))
-
             gt_rgb = torch.squeeze(gt_rgb,axis=-1)
             pred_depth = outputs['depth']
-            #print("CHECKING NETWORK RESULT")
-            #print(gt_rgb)
-            #print(" ")
-            #print(pred_depth)
+            # print("CHECKING NETWORK RESULT")
+            # print(gt_rgb)
+            # print(" ")
+            # print(pred_depth)
             l2 = torch.nn.MSELoss()
             l1 = torch.nn.L1Loss()
-            depth_loss = l1(pred_depth,gt_rgb)
+            var = torch.mean(torch.abs(pred_depth-gt_rgb)/(torch.sqrt(outputs['depth_var']+1e-12)))
+            depth_loss = l1(pred_depth,gt_rgb) #+ var + torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
             loss = depth_loss
 
             pred_rgb = outputs['image']
 
         elif data['type'] == 'touch':
-            # print("ENTERED CORRECT LOCATION")
-            # print(rays_o.shape)
-            # print(rays_d.shape)
-            outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, 
-                                        perturb=True, force_all_rays=False, datatype=data['type'],
-                                         max_depth=self.opt.touch_far, **vars(self.opt))
-
             gt_rgb = torch.squeeze(gt_rgb,axis=-1)
             pred_depth = outputs['depth']
             l2 = torch.nn.MSELoss()
             l1 = torch.nn.L1Loss()
             #print("vals")
             #print(pred_depth[gt_rgb<self.opt.touch_far].shape)
-            touch_loss = l1(pred_depth[gt_rgb<self.opt.touch_far],gt_rgb[gt_rgb<self.opt.touch_far])
+            touch_loss = l1(pred_depth[gt_rgb<data['far']],gt_rgb[gt_rgb<data['far']])
             #print("CHECK VALUES")
             #print(touch_loss)
             #print(pred_depth)
@@ -674,7 +685,8 @@ class Trainer(object):
             pred_rgb = outputs['image']
             # print("not implemented touch yet!")
            
-
+        # print("loss")
+        # print(loss)
         # special case for CCNeRF's rank-residual training
         if len(loss.shape) == 3: # [K, B, N]
             loss = loss.mean(0)
@@ -726,15 +738,17 @@ class Trainer(object):
         else:
             gt_rgb = images
         
-        if data['type'] == 'rgb':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
-                                        datatype=data['type'], max_depth=self.opt.depth_far, **vars(self.opt))
-        elif data['type'] == 'depth':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
-                                        datatype=data['type'], max_depth=self.opt.depth_far, **vars(self.opt))
-        elif data['type'] == 'touch':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
-                                        datatype=data['type'], max_depth=self.opt.touch_far, **vars(self.opt))
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+                                        datatype=data['type'], max_far=data['far'], min_near=data['near'], **vars(self.opt))
+        # if data['type'] == 'rgb':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+        #                                 datatype=data['type'], max_depth=data['type'], **vars(self.opt))
+        # elif data['type'] == 'depth':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+        #                                 datatype=data['type'], max_depth=data['type'], **vars(self.opt))
+        # elif data['type'] == 'touch':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=False, 
+        #                                 datatype=data['type'], max_depth=data['type'], **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)
@@ -746,6 +760,8 @@ class Trainer(object):
     # moved out bg_color and perturb for more flexible control...
     def test_step(self, data, bg_color=None, perturb=False):  
 
+        # print(data)
+
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         H, W = data['H'], data['W']
@@ -754,18 +770,25 @@ class Trainer(object):
             bg_color = bg_color.to(self.device)
 
         #print(data['type'])
-        if data['type'] == 'rgb':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
                                         perturb=perturb, datatype=data['type'], 
-                                        max_depth = self.opt.depth_far, **vars(self.opt))
-        elif data['type'] == 'depth':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
-                                        perturb=perturb, datatype=data['type'], 
-                                        max_depth = self.opt.depth_far, **vars(self.opt))
-        elif data['type'] == 'touch':
-            outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
-                                        perturb=perturb, datatype=data['type'], 
-                                        max_depth = self.opt.touch_far, **vars(self.opt))
+                                        max_far = data['far'], min_near = data['near'], **vars(self.opt))
+        # if data['type'] == 'rgb':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+        #                                 perturb=perturb, datatype=data['type'], 
+        #                                 max_depth = data['far'], **vars(self.opt))
+        # elif data['type'] == 'depth':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+        #                                 perturb=perturb, datatype=data['type'], 
+        #                                 max_depth = data['far'], **vars(self.opt))
+        # elif data['type'] == 'touch':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+        #                                 perturb=perturb, datatype=data['type'], 
+        #                                 max_depth = data['far'], **vars(self.opt))
+        # elif data['type'] == 'viewer':
+        #     outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, 
+        #                                 perturb=perturb, datatype=data['type'], 
+        #                                 max_depth = data['far'], **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
@@ -1000,6 +1023,8 @@ class Trainer(object):
             'rays_d': rays['rays_d'],
             'H': rH,
             'W': rW,
+            'near': 1e-9,
+            'far': 1e9
         }
         
         self.model.eval()
