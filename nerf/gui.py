@@ -143,7 +143,7 @@ class NeRFGUI:
                 full_t = t / (self.downscale ** 2)
                 downscale = min(1, max(1/4, math.sqrt(200 / full_t)))
                 if downscale > self.downscale * 1.2 or downscale < self.downscale * 0.8:
-                    self.downscale = downscale
+                    self.downscale = max(1/2, downscale)
 
             if self.need_update:
                 self.render_buffer = outputs['image']

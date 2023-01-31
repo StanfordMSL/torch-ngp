@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from .utils import get_rays, srgb_to_linear, torch_vis_2d
 import matplotlib.pyplot as plt
+import pprint
 
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
 def nerf_matrix_to_ngp(pose, scale=0.33, offset=[0, 0, 0]):
@@ -120,13 +121,6 @@ class NeRFDataset:
         if not self.use_original:
             self.root_path = os.path.join(self.root_path, 'color')
 
-        #print("")
-        #print("_____________________________________________________________________")
-        #print(os.path.join(self.root_path, 'color/transforms.json'))
-        # auto-detect transforms.json and split mode.
-        #if os.path.exists(os.path.join(self.root_path, 'color/transforms.json')):
-        
-
         if os.path.exists(os.path.join(self.root_path, 'transforms.json')):
             self.mode = 'colmap' # manually split, use view-interpolation for test.
         elif os.path.exists(os.path.join(self.root_path, 'transforms_train.json')):
@@ -168,27 +162,6 @@ class NeRFDataset:
 
         self.config = transform
 
-        if 'near' in transform:
-            self.near =  float(transform['near'])
-        else:
-            self.near = 1e-6
-
-        if 'far' in transform:
-            self.far = float(transform['far'])
-        else:
-            self.far = 1.e9
-
-        print("FAR IS: ", self.far)
-        print("NEAR IS: ", self.near)
-
-        # load image size
-        if 'h' in transform and 'w' in transform:
-            self.H = int(transform['h']) // downscale
-            self.W = int(transform['w']) // downscale
-        else:
-            # we have to actually read an image to get H and W later.
-            self.H = self.W = None
-        
         # read images
         frames = transform["frames"]
         #frames = sorted(frames, key=lambda d: d['file_path']) # why do I sort...
@@ -224,6 +197,10 @@ class NeRFDataset:
             self.poses = []
             self.val_poses = []
             self.images = []
+            self.near = []
+            self.far = []
+            self.H = []
+            self.W = []
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 #print("color")
@@ -243,9 +220,54 @@ class NeRFDataset:
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
-                if self.H is None or self.W is None:
-                    self.H = image.shape[0] // downscale
-                    self.W = image.shape[1] // downscale
+                
+                # check if we have multiple cameras in use
+                if "cameras" in transform:
+                    
+                    # check if near plane for specified camera was provided. If not use default value close to zero
+                    if "near" in transform["cameras"][f['camera']]:
+                        self.near.append(float(transform["cameras"][f['camera']]["near"]))
+                    else:
+                        self.near.append(1e-6)
+
+                    # check if far plane for specified camera was provided. If not use large default value
+                    if "far" in transform["cameras"][f['camera']]:
+                        self.far.append(float(transform["cameras"][f['camera']]["far"]))
+                    else:
+                        self.far.append(1.e9)
+
+                    
+                    # check if image dimensions were provided for specified camera. if not use image dimensions
+                    if "H" in transform["cameras"][f['camera']] and "W" in transform["cameras"][f['camera']]:
+                        self.H.append(transform[f['camera']]["H"] // downscale)
+                        self.W.append(transform[f['camera']]["W"] // downscale)
+                    else:
+                        self.H.append(image.shape[0] // downscale)
+                        self.W.append(image.shape[1] // downscale)
+
+                # only one camera in use
+                else:
+
+                    # check if near plane was provided. If not use default value close to zero
+                    if "near" in transform:
+                        self.near.append(float(transform["near"]))
+                    else:
+                        self.near.append(1e-6)
+
+                    # check if far plane was provided. If not use large default value
+                    if "far" in transform:
+                        self.far.append(float(transform["far"]))
+                    else:
+                        self.far.append(1.e9)
+
+                    # check if image dimensions was provided for camera if not use image parameters
+                    if "H" in transform and "W" in transform:
+                        self.H.append(transform["H"] // downscale)
+                        self.W.append(transform["W"] // downscale)
+
+                    else: #self.H is None or self.W is None:
+                        self.H.append(image.shape[0] // downscale)
+                        self.W.append(image.shape[1] // downscale)
 
                 # add support for the alpha channel as a mask.
                 if image.shape[-1] == 3: 
@@ -253,18 +275,25 @@ class NeRFDataset:
                 else:
                     image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
 
-                if image.shape[0] != self.H or image.shape[1] != self.W:
-                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                # check if image matches with expected dimensions, if not interpolate to make it fit
+                if image.shape[0] != self.H[-1] or image.shape[1] != self.W[-1]:
+                    image = cv2.resize(image, (self.W[-1], self.H[-1]), interpolation=cv2.INTER_AREA)
                     
                 image = image.astype(np.float32) / 255 # [H, W, 3/4]
 
                 self.poses.append(pose)
-                self.images.append(image)
-        #print(self.poses)
+                self.images.append(torch.from_numpy(image))
+        
+
+
+        self.H = np.asarray(self.H)
+        self.W = np.asarray(self.W)
+        self.near = np.asarray(self.near)
+        self.far = np.asarray(self.far)
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         self.val_poses = torch.from_numpy(np.stack(self.val_poses, axis=0))
-        if self.images is not None:
-            self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+        #if self.images is not None:
+        #    self.images = torch.nested.nested_tensor(self.images)#torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -272,13 +301,13 @@ class NeRFDataset:
 
         # initialize error_map
         if self.training and self.opt.error_map:
-            self.error_map = torch.ones([self.images.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
+            self.error_map = torch.ones([len(self.images), 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
         else:
             self.error_map = None
 
         # [debug] uncomment to view all training poses.
         visualize_poses(self.poses.numpy())
-
+        
         # [debug] uncomment to view examples of randomly generated poses.
         #visualize_poses(rand_poses(100, self.device, radius=self.radius).cpu().numpy())
 
@@ -295,76 +324,103 @@ class NeRFDataset:
                 self.error_map = self.error_map.to(self.device)
 
         # load intrinsics
-        if 'fl_x' in transform or 'fl_y' in transform:
-            fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
-            fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
-        elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
-            # blender, assert in radians. already downscaled since we use H/W
-            fl_x = self.W / (2 * np.tan(transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
-            fl_y = self.H / (2 * np.tan(transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
-            if fl_x is None: fl_x = fl_y
-            if fl_y is None: fl_y = fl_x
+        if 'cameras' in transform:
+            self.intrinsics = []
+            for i, f in enumerate(transform["frames"]):
+                if 'fl_x' in transform["cameras"][f["camera"]] or 'fl_y' in transform["cameras"][f["camera"]]:
+                    fl_x = (transform["cameras"][f["camera"]]['fl_x'] if 'fl_x' in transform["cameras"][f["camera"]] else transform["cameras"][f["camera"]]['fl_y']) / downscale
+                    fl_y = (transform["cameras"][f["camera"]]['fl_y'] if 'fl_y' in transform["cameras"][f["camera"]] else transform["cameras"][f["camera"]]['fl_x']) / downscale
+                
+                elif 'camera_angle_x' in transform["cameras"][f["camera"]] or 'camera_angle_y' in transform["cameras"][f["camera"]]:
+                    x = np.sqrt(self.W[i]**2 + self.H[i]**2)
+                    fl_x = self.W[i] / (2 * np.tan(transform["cameras"][f["camera"]]['camera_angle_x'] / 2)) if 'camera_angle_x' in transform["cameras"][f["camera"]] else None
+                    fl_y = self.H[i] / (2 * np.tan(transform["cameras"][f["camera"]]['camera_angle_y'] / 2)) if 'camera_angle_y' in transform["cameras"][f["camera"]] else None
+                    if fl_x is None: fl_x = fl_y
+                    if fl_y is None: fl_y = fl_x
+
+                cx = (transform["cameras"][f["camera"]]['cx'] / downscale) if 'cx' in transform["cameras"][f["camera"]] else (self.W[i] / 2)
+                cy = (transform["cameras"][f["camera"]]['cy'] / downscale) if 'cy' in transform["cameras"][f["camera"]] else (self.H[i] / 2)
+            
+                self.intrinsics.append(np.array([fl_x, fl_y, cx, cy]))
+            
+            self.intrinsics = np.asarray(self.intrinsics)
         else:
-            raise RuntimeError('Failed to load focal length, please check the transforms.json!')
+            if 'fl_x' in transform or 'fl_y' in transform:
+                fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
+                fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
+            elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
+                # blender, assert in radians. already downscaled since we use H/W
+                x = np.sqrt(self.W[-1]**2 + self.H[-1]**2)
+                fl_x = self.W[-1] / (2 * np.tan(transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
+                fl_y = self.H / (2 * np.tan(transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
+                if fl_x is None: fl_x = fl_y
+                if fl_y is None: fl_y = fl_x
+            else:
+                raise RuntimeError('Failed to load focal length, please check the transforms.json!')
 
-        cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
-        cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
+            cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
+            cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
     
-        print("intrinics")
-        print("fl_x: " , fl_x)
-        print("cx: " , cx)
-        print("cy: " , cy)
-        self.intrinsics = np.array([fl_x, fl_y, cx, cy])
+            self.intrinsics = np.tile(np.array([fl_x, fl_y, cx, cy]),(self.images.size[0],1))
 
+        print("intrinics")
+        #print("fl_x: " , fl_x)
+        print("W: ", self.W.shape)
+        print("H: ", self.H.shape)
+        #print("FOV X", transform['camera_angle_x'])
+        #print("cx: " , cx)
+        #print("cy: " , cy)
+        print("intrinics: ", self.intrinsics.shape)
+        print(self.intrinsics)
+        #print("intrinics: ", self.intrinsics)
+        #self.intrinsics = np.array([fl_x, fl_y, cx, cy])
+        #stop
 
     def collate(self, index):
 
         B = len(index) # a list of length 1
+        index = index[0] #To do handle multiple images in a batch!
 
         # random pose without gt images.
-        if self.rand_pose == 0 or index[0] >= len(self.poses):
+        if self.rand_pose == 0 or index >= len(self.poses):
 
             poses = rand_poses(B, self.device, radius=self.radius)
 
             # sample a low-resolution but full image for CLIP
-            s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
-            rH, rW = int(self.H / s), int(self.W / s)
-            rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
+            s = np.sqrt(float(self.H[index]) * float(self.W[index]) / self.num_rays) # only in training, assert num_rays > 0
+            rH, rW = int(float(self.H[index]) / s), int(float(self.W[index]) / s)
+            rays = get_rays(poses, self.intrinsics[index] / s, rH, rW, -1)
             #print("OH NO")
             return {
                 'type': 'rgb',
-                'camera_angle_x':self.config['camera_angle_x'],
+                #'camera_angle_x':self.config['camera_angle_x'],
                 'H': rH,
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'], 
-                'poses':poses,
-                'near': self.near,
-                'far': self.far   
+                #'poses':poses,
+                'near': float(self.near[index]),
+                'far': float(self.far[index])   
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
         
-        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
-        #print(self.intrinsics)
-        #stop
-        #print(" ")
-        #print("poses")
-        #print(poses)
+        rays = get_rays(torch.unsqueeze(poses,0), self.intrinsics[index], int(self.H[index]), int(self.W[index]), self.num_rays, error_map)
+
         results = {
             'type': 'rgb',
-            'camera_angle_x':self.config['camera_angle_x'],
-            'H': self.H,
-            'W': self.W,
+            #'camera_angle_x':self.config['camera_angle_x'],
+            'H': int(self.H[index]),
+            'W': int(self.W[index]),
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            'poses':self.val_poses[index].to(self.device),
-            'near': self.near,
-            'far': self.far
+            #'poses':self.val_poses[index].to(self.device),
+            'near': float(self.near[index]),
+            'far': float(self.far[index])
         }
-
+        
         if self.images is not None:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
             if self.training:
@@ -468,28 +524,28 @@ class NeRFDepthDataset:
         else:
             raise NotImplementedError(f'unknown dataset mode: {self.mode}')
 
-        self.config = transform 
+        # self.config = transform 
 
-        if 'near' in transform:
-            self.near =  float(transform['near'])
-        else:
-            self.near = 1e-6
+        # if 'near' in transform:
+        #     self.near =  float(transform['near'])
+        # else:
+        #     self.near = 1e-6
 
-        if 'far' in transform:
-            self.far = float(transform['far'])
-        else:
-            self.far = 1.e9
+        # if 'far' in transform:
+        #     self.far = float(transform['far'])
+        # else:
+        #     self.far = 1.e9
 
-        print("FAR IS: ", self.far)
-        print("NEAR IS: ", self.near)
+        # print("FAR IS: ", self.far)
+        # print("NEAR IS: ", self.near)
 
-        # load image size
-        if 'h' in transform and 'w' in transform:
-            self.H = int(transform['h']) // downscale
-            self.W = int(transform['w']) // downscale
-        else:
-            # we have to actually read an image to get H and W later.
-            self.H = self.W = None
+        # # load image size
+        # if 'h' in transform and 'w' in transform:
+        #     self.H = int(transform['h']) // downscale
+        #     self.W = int(transform['w']) // downscale
+        # else:
+        #     # we have to actually read an image to get H and W later.
+        #     self.H = self.W = None
 
         #max_depth = transform['camera_max_depth']
         #min_depth = transform['camera_min_depth']
@@ -524,84 +580,134 @@ class NeRFDepthDataset:
                 elif type == 'val':
                     frames = frames[:1]
                 # else 'all' or 'trainval' : use all frames
-
+            
             self.poses = []
+            self.val_poses = []
             self.images = []
-            #print("HEY")
+            self.near = []
+            self.far = []
+            self.H = []
+            self.W = []
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path']+'.png')
-                #print("depth path")
+                f_path = os.path.join(self.root_path, f['file_path'])
+                #print("color")
                 #print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
-                
-                # there are non-exist paths in fox...
-                if not os.path.exists(f_path):
-                    print("does not exist!")
-                    continue
+                if self.mode == 'blender' and '.' not in os.path.basename(f_path):
+                    f_path += '.png' # so silly...
 
+                # there are non-exist paths in fox...
+                #print(f_path)
+                if not os.path.exists(f_path):
+                    print("passed")
+                    continue
+                
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                self.val_poses.append(pose)
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+
                 
+                
+                # check if we have multiple cameras in use
+                if "cameras" in transform:
+                    
+                    # check if near plane for specified camera was provided. If not use default value close to zero
+                    if "near" in transform["cameras"][f['camera']]:
+                        self.near.append(float(transform["cameras"][f['camera']]["near"]))
+                    else:
+                        self.near.append(1e-6)
+
+                    # check if far plane for specified camera was provided. If not use large default value
+                    if "far" in transform["cameras"][f['camera']]:
+                        self.far.append(float(transform["cameras"][f['camera']]["far"]))
+                    else:
+                        self.far.append(1.e9)
+
+                    
+                    # check if image dimensions were provided for specified camera. if not use image dimensions
+                    if "H" in transform["cameras"][f['camera']] and "W" in transform["cameras"][f['camera']]:
+                        self.H.append(transform[f['camera']]["H"] // downscale)
+                        self.W.append(transform[f['camera']]["W"] // downscale)
+                    else:
+                        self.H.append(image.shape[0] // downscale)
+                        self.W.append(image.shape[1] // downscale)
+
+                # only one camera in use
+                else:
+
+                    # check if near plane was provided. If not use default value close to zero
+                    if "near" in transform:
+                        self.near.append(float(transform["near"]))
+                    else:
+                        self.near.append(1e-6)
+
+                    # check if far plane was provided. If not use large default value
+                    if "far" in transform:
+                        self.far.append(float(transform["far"]))
+                    else:
+                        self.far.append(1.e9)
+
+                    # check if image dimensions was provided for camera if not use image parameters
+                    if "H" in transform and "W" in transform:
+                        self.H.append(transform["H"] // downscale)
+                        self.W.append(transform["W"] // downscale)
+
+                    else: #self.H is None or self.W is None:
+                        self.H.append(image.shape[0] // downscale)
+                        self.W.append(image.shape[1] // downscale)
+
+                # # add support for the alpha channel as a mask.
+                # if image.shape[-1] == 3: 
+                #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                # else:
+                #     image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+
+                # check if image matches with expected dimensions, if not interpolate to make it fit
+                if image.shape[0] != self.H[-1] or image.shape[1] != self.W[-1]:
+                    image = cv2.resize(image, (self.W[-1], self.H[-1]), interpolation=cv2.INTER_AREA)
+
                 # convert images into raw distance based on camera intrinics
-                image = image.astype(np.float32) / (255.)*(self.far - self.near) + self.near # [H, W, 3/4]
-                #print(image)
-                
-  
-                #image = image.astype(np.float32)/ (255.)# [H, W, 3/4]
-                #plt.imshow(image)
-                #plt.show()
-                #print(image)
-                #stop
-                
-                if self.H is None or self.W is None:
-                    self.H = image.shape[0] // downscale
-                    self.W = image.shape[1] // downscale
+                image = image.astype(np.float32) / (255.)*(self.far[-1] - self.near[-1]) + self.near[-1] # [H, W, 3/4]
+                image = torch.unsqueeze(torch.from_numpy(image),dim=-1)
 
-                if image.shape[0] != self.H or image.shape[1] != self.W:
-                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                # image = image.astype(np.float32) / 255 # [H, W, 3/4]
 
-                
-                
-                #print(f_path)
-                #print(image)
-                #print(np.max(image))
-                #print(np.min(image))
-                #print(np.mean(image))
-                #plt.imshow(image)
-                #plt.show()
-                #stop
-
-                #image = (image*(max_depth - min_depth) + min_depth)*self.scale
+                # plt.imshow(image)
+                # plt.show()
+                # print(image)
+                # stop
 
                 self.poses.append(pose)
                 self.images.append(image)
+        
 
+
+        self.H = np.asarray(self.H)
+        self.W = np.asarray(self.W)
+        self.near = np.asarray(self.near)
+        self.far = np.asarray(self.far)
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
-        if self.images is not None:
-            self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
-            #print(self.images.shape)
-            
-            self.images = torch.unsqueeze(self.images,dim=-1)
-            #print(self.images.shape)
-            # stop
+        self.val_poses = torch.from_numpy(np.stack(self.val_poses, axis=0))
+        #if self.images is not None:
+        #    self.images = torch.nested.nested_tensor(self.images)#torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+        
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
         #print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
 
         # initialize error_map
         if self.training and self.opt.error_map:
-            self.error_map = torch.ones([self.images.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
+            self.error_map = torch.ones([len(self.images), 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
         else:
             self.error_map = None
 
         # [debug] uncomment to view all training poses.
         visualize_poses(self.poses.numpy())
-
+        
         # [debug] uncomment to view examples of randomly generated poses.
         #visualize_poses(rand_poses(100, self.device, radius=self.radius).cpu().numpy())
-
 
         if self.preload:
             self.poses = self.poses.to(self.device)
@@ -616,37 +722,202 @@ class NeRFDepthDataset:
                 self.error_map = self.error_map.to(self.device)
 
         # load intrinsics
-        if 'fl_x' in transform or 'fl_y' in transform:
-            fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
-            fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
-        elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
-            # blender, assert in radians. already downscaled since we use H/W
-            fl_x = self.W / (2 * np.tan(transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
-            fl_y = self.H / (2 * np.tan(transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
-            if fl_x is None: fl_x = fl_y
-            if fl_y is None: fl_y = fl_x
+        if 'cameras' in transform:
+            self.intrinsics = []
+            for i, f in enumerate(transform["frames"]):
+                if 'fl_x' in transform["cameras"][f["camera"]] or 'fl_y' in transform["cameras"][f["camera"]]:
+                    fl_x = (transform["cameras"][f["camera"]]['fl_x'] if 'fl_x' in transform["cameras"][f["camera"]] else transform["cameras"][f["camera"]]['fl_y']) / downscale
+                    fl_y = (transform["cameras"][f["camera"]]['fl_y'] if 'fl_y' in transform["cameras"][f["camera"]] else transform["cameras"][f["camera"]]['fl_x']) / downscale
+                
+                elif 'camera_angle_x' in transform["cameras"][f["camera"]] or 'camera_angle_y' in transform["cameras"][f["camera"]]:
+                    x = np.sqrt(self.W[i]**2 + self.H[i]**2)
+                    fl_x = self.W[i] / (2 * np.tan(transform["cameras"][f["camera"]]['camera_angle_x'] / 2)) if 'camera_angle_x' in transform["cameras"][f["camera"]] else None
+                    fl_y = self.H[i] / (2 * np.tan(transform["cameras"][f["camera"]]['camera_angle_y'] / 2)) if 'camera_angle_y' in transform["cameras"][f["camera"]] else None
+                    if fl_x is None: fl_x = fl_y
+                    if fl_y is None: fl_y = fl_x
+
+                cx = (transform["cameras"][f["camera"]]['cx'] / downscale) if 'cx' in transform["cameras"][f["camera"]] else (self.W[i] / 2)
+                cy = (transform["cameras"][f["camera"]]['cy'] / downscale) if 'cy' in transform["cameras"][f["camera"]] else (self.H[i] / 2)
+            
+                self.intrinsics.append(np.array([fl_x, fl_y, cx, cy]))
+            
+            self.intrinsics = np.asarray(self.intrinsics)
         else:
-            raise RuntimeError('Failed to load focal length, please check the transforms.json!')
+            if 'fl_x' in transform or 'fl_y' in transform:
+                fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
+                fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
+            elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
+                # blender, assert in radians. already downscaled since we use H/W
+                x = np.sqrt(self.W[-1]**2 + self.H[-1]**2)
+                fl_x = self.W[-1] / (2 * np.tan(transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
+                fl_y = self.H / (2 * np.tan(transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
+                if fl_x is None: fl_x = fl_y
+                if fl_y is None: fl_y = fl_x
+            else:
+                raise RuntimeError('Failed to load focal length, please check the transforms.json!')
 
-        cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
-        cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
+            cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
+            cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
+    
+            self.intrinsics = np.tile(np.array([fl_x, fl_y, cx, cy]),(self.images.size[0],1))
 
-        self.intrinsics = np.array([fl_x, fl_y, cx, cy])
+        print("intrinics")
+        #print("fl_x: " , fl_x)
+        print("W: ", self.W.shape)
+        print("H: ", self.H.shape)
+        #print("FOV X", transform['camera_angle_x'])
+        #print("cx: " , cx)
+        #print("cy: " , cy)
+        print("intrinics: ", self.intrinsics.shape)
+        print(self.intrinsics)
 
+            # self.poses = []
+            # self.images = []
+            # #print("HEY")
+            # for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
+            #     f_path = os.path.join(self.root_path, f['file_path']+'.png')
+            #     #print("depth path")
+            #     #print(f_path)
+            #     #f_path = os.path.join('.',f['file_path'])
+                
+            #     # there are non-exist paths in fox...
+            #     if not os.path.exists(f_path):
+            #         print("does not exist!")
+            #         continue
+
+            #     pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+            #     pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
+
+            #     image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+                
+            #     # convert images into raw distance based on camera intrinics
+            #     image = image.astype(np.float32) / (255.)*(self.far - self.near) + self.near # [H, W, 3/4]
+            #     #print(image)
+                
+  
+            #     #image = image.astype(np.float32)/ (255.)# [H, W, 3/4]
+            #     #plt.imshow(image)
+            #     #plt.show()
+            #     #print(image)
+            #     #stop
+                
+            #     if self.H is None or self.W is None:
+            #         self.H = image.shape[0] // downscale
+            #         self.W = image.shape[1] // downscale
+
+            #     if image.shape[0] != self.H or image.shape[1] != self.W:
+            #         image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+
+                
+                
+            #     #print(f_path)
+            #     #print(image)
+            #     #print(np.max(image))
+            #     #print(np.min(image))
+            #     #print(np.mean(image))
+            #     #plt.imshow(image)
+            #     #plt.show()
+            #     #stop
+
+            #     #image = (image*(max_depth - min_depth) + min_depth)*self.scale
+
+            #     self.poses.append(pose)
+            #     self.images.append(image)
+
+        # self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
+        # if self.images is not None:
+        #     self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+        #     #print(self.images.shape)
+            
+        #     self.images = torch.unsqueeze(self.images,dim=-1)
+        #     #print(self.images.shape)
+        #     # stop
+        # # calculate mean radius of all camera poses
+        # self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
+        # #print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
+
+        # # initialize error_map
+        # if self.training and self.opt.error_map:
+        #     self.error_map = torch.ones([self.images.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
+        # else:
+        #     self.error_map = None
+
+        # # [debug] uncomment to view all training poses.
+        # visualize_poses(self.poses.numpy())
+
+        # # [debug] uncomment to view examples of randomly generated poses.
+        # #visualize_poses(rand_poses(100, self.device, radius=self.radius).cpu().numpy())
+
+
+        # if self.preload:
+        #     self.poses = self.poses.to(self.device)
+        #     if self.images is not None:
+        #         # TODO: linear use pow, but pow for half is only available for torch >= 1.10 ?
+        #         if self.fp16 and self.opt.color_space != 'linear':
+        #             dtype = torch.half
+        #         else:
+        #             dtype = torch.float
+        #         self.images = self.images.to(dtype).to(self.device)
+        #     if self.error_map is not None:
+        #         self.error_map = self.error_map.to(self.device)
+
+        # # load intrinsics
+        # if 'fl_x' in transform or 'fl_y' in transform:
+        #     fl_x = (transform['fl_x'] if 'fl_x' in transform else transform['fl_y']) / downscale
+        #     fl_y = (transform['fl_y'] if 'fl_y' in transform else transform['fl_x']) / downscale
+        # elif 'camera_angle_x' in transform or 'camera_angle_y' in transform:
+        #     # blender, assert in radians. already downscaled since we use H/W
+        #     fl_x = self.W / (2 * np.tan((2*np.pi)/(360)*transform['camera_angle_x'] / 2)) if 'camera_angle_x' in transform else None
+        #     fl_y = self.H / (2 * np.tan((2*np.pi)/(360)*transform['camera_angle_y'] / 2)) if 'camera_angle_y' in transform else None
+        #     if fl_x is None: fl_x = fl_y
+        #     if fl_y is None: fl_y = fl_x
+        # else:
+        #     raise RuntimeError('Failed to load focal length, please check the transforms.json!')
+
+        # cx = (transform['cx'] / downscale) if 'cx' in transform else (self.W / 2)
+        # cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
+
+        # print("Depth Intrinics")
+        # print("fl_x: " , fl_x)
+        # print("W: ", self.W)
+        # print("H: ", self.H)
+        # print("FOV X", transform['camera_angle_x'])
+        # print("cx: " , cx)
+        # print("cy: " , cy)
+
+        # self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
     def collate(self, index):
 
         B = len(index) # a list of length 1
+        # print("PRITING INDEX")
+        # print(index)
+        # print("near")
+        # print(len(self.near))
+        # print("far")
+        # print(len(self.far))
+        # print("H")
+        # print(len(self.H))
+        # print("W")
+        # print(len(self.W))
+        # print("images")
+        # print(len(self.images))
+        # print(" ")
+        # print(self.images[index[0]].shape)
+        
+
+
+        index = index[0] #To do handle multiple images in a batch!
 
         # random pose without gt images.
-        if self.rand_pose == 0 or index[0] >= len(self.poses):
+        if self.rand_pose == 0 or index >= len(self.poses):
 
             poses = rand_poses(B, self.device, radius=self.radius)
 
             # sample a low-resolution but full image for CLIP
-            s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
-            rH, rW = int(self.H / s), int(self.W / s)
-            rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
+            s = np.sqrt(float(self.H[index]) * float(self.W[index]) / self.num_rays) # only in training, assert num_rays > 0
+            rH, rW = int(float(self.H[index]) / s), int(float(self.W[index]) / s)
+            rays = get_rays(poses, self.intrinsics[index] / s, rH, rW, -1)
 
             return {
                 'type': 'depth',
@@ -654,24 +925,24 @@ class NeRFDepthDataset:
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'],
-                'near': self.near,
-                'far': self.far
+                'near': float(self.near[index]),
+                'far': float(self.far[index])
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
 
-        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
+        rays = get_rays(torch.unsqueeze(poses,0), self.intrinsics[index], int(self.H[index]), int(self.W[index]), self.num_rays, error_map)
         
         results = {
             'type': 'depth',
-            'H': self.H,
-            'W': self.W,
+            'H': int(self.H[index]),
+            'W': int(self.W[index]),
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            'near': self.near,
-            'far': self.far
+            'near': float(self.near[index]),
+            'far': float(self.far[index])
         }
 
         if self.images is not None:
@@ -692,6 +963,7 @@ class NeRFDepthDataset:
             results['inds_coarse'] = rays['inds_coarse']
 
         return results
+
 
     def dataloader(self):
         size = len(self.poses)

@@ -560,7 +560,7 @@ class Trainer(object):
 
             B, N = rays_o.shape[:2]
             H, W = data['H'], data['W']
-
+            
             # currently fix white bg, MUST force all rays!
             outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=None, 
                                             perturb=True, force_all_rays=True, datatype=data['type'],
@@ -598,6 +598,8 @@ class Trainer(object):
         images = data['images'] # [B, N, 3/4]
 
         B, N, C = images.shape
+        
+        # print(B,N,C)
         # print("C")
         # print(C)
         
@@ -640,11 +642,16 @@ class Trainer(object):
             
             l2 = torch.nn.MSELoss()
             #var_loss = torch.mean(torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].unsqueeze(-1)/(outputs['image_var']+1e-10))
-            # print("predicted image")
-            # print(outputs['image'])
-            # print("gt image")
-            # print(gt_rgb)
-            loss = torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean() #l2(pred_rgb,gt_rgb) #+ 1e-4*var_loss#torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
+            #print("predicted image")
+            #print(outputs['image'])
+            #print("gt image")
+            #print(gt_rgb)
+            loss = l2(pred_rgb, gt_rgb) #+ torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()#torch.log(1+torch.square(pred_rgb-gt_rgb)/gt_rgb).mean() + torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()#(2*torch.log(torch.square(pred_rgb-gt_rgb)+1e-12)).mean()
+            #print("max diff")
+            #print(torch.max(torch.abs(pred_rgb-gt_rgb)))
+            #print(" ")
+
+            #torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean() #l2(pred_rgb,gt_rgb) #+ 1e-4*var_loss#torch.max(torch.abs(pred_rgb-gt_rgb),dim=-1)[0].mean()
             #print("CHECKING ELEMENTS")
             #print(torch.any(torch.isnan(pred_rgb)))
             #print(torch.any(torch.isinf(pred_rgb)))
@@ -655,6 +662,7 @@ class Trainer(object):
 
         elif data['type'] == 'depth':
             gt_rgb = torch.squeeze(gt_rgb,axis=-1)
+            #print(gt_rgb.shape)
             pred_depth = outputs['depth']
             # print("CHECKING NETWORK RESULT")
             # print(gt_rgb)
@@ -663,7 +671,7 @@ class Trainer(object):
             l2 = torch.nn.MSELoss()
             l1 = torch.nn.L1Loss()
             var = torch.mean(torch.abs(pred_depth-gt_rgb)/(torch.sqrt(outputs['depth_var']+1e-12)))
-            depth_loss = l1(pred_depth,gt_rgb) #+ var + torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
+            depth_loss = l1(pred_depth,gt_rgb) #+ torch.log(1+torch.square(pred_depth-gt_rgb)/gt_rgb).mean()  #+ var + torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
             loss = depth_loss
 
             pred_rgb = outputs['image']
