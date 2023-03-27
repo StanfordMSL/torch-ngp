@@ -2,9 +2,9 @@ import torch
 #import lietorch
 import argparse
 
-from nerf.provider import NeRFDataset
-from nerf.provider import NeRFDepthDataset
-from nerf.provider import NeRFTouchDataset
+from nerf.rgb_provider import NeRFDataset
+from nerf.depth_provider import NeRFDepthDataset
+from nerf.touch_provider import NeRFTouchDataset
 from nerf.gui import NeRFGUI
 from nerf.utils import *
 
