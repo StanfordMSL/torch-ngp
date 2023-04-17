@@ -16,6 +16,21 @@ from .utils import get_rays, srgb_to_linear, torch_vis_2d
 import matplotlib.pyplot as plt
 import pprint
 
+
+Rx = lambda theta: np.array([[1, 0, 0],
+                             [0, np.cos(theta), -1*np.sin(theta)],
+                             [0, np.sin(theta), np.cos(theta)]
+                            ])
+Ry = lambda phi: np.array([[np.cos(phi), 0, np.sin(phi)],
+                           [0,1,0],
+                           [-1*np.sin(phi), 0, np.cos(phi)]
+                          ])
+Rz = lambda psi: np.array([[np.cos(psi), -1*np.sin(psi),0],
+                           [np.sin(psi),np.cos(psi),0],
+                           [0,0,1]
+                          ])
+
+
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
 def nerf_matrix_to_ngp(pose, scale=0.33, offset=[0, 0, 0]):
     # for the fox dataset, 0.33 scales camera radius to ~ 2
@@ -36,6 +51,8 @@ def visualize_poses(poses, size=0.1):
     box.colors = np.array([[128, 128, 128]] * len(box.entities))
     objects = [axes, box]
 
+    inds = np.random.choice(np.arange(poses.shape[0]), size=4, replace=False)
+    poses = poses[inds,...]
     for pose in poses:
         # a camera is visualized with 8 line segments.
         pos = pose[:3, 3]
@@ -51,6 +68,8 @@ def visualize_poses(poses, size=0.1):
         segs = np.array([[pos, a], [pos, b], [pos, c], [pos, d], [a, b], [b, c], [c, d], [d, a], [pos, o]])
         segs = trimesh.load_path(segs)
         objects.append(segs)
+        objects.append(trimesh.creation.axis(axis_length=.5, transform=pose))
+
     
     # sphere = trimesh.primitives.Sphere(radius=1, center=(0,0,0))
     # objects.append(sphere)
@@ -213,6 +232,16 @@ class NeRFDepthDataset:
                     continue
                 
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                T = np.eye(4)
+                T[:3,:3] = Ry(np.pi/2)
+                pose = T@pose
+                pose = np.linalg.inv(pose)
+                Ta = np.eye(4)
+                #Tb = np.eye(4)
+                Ta[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
+                #Tb[:3,:3] = Ry(np.pi)
+                pose = Ta@pose
+                pose = np.linalg.inv(pose)
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]

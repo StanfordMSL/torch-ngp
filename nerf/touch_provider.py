@@ -16,6 +16,19 @@ from .utils import get_rays, srgb_to_linear, torch_vis_2d
 import matplotlib.pyplot as plt
 import pprint
 
+Rx = lambda theta: np.array([[1, 0, 0], 
+                             [0, np.cos(theta), -1*np.sin(theta)],
+                             [0, np.sin(theta), np.cos(theta)]
+                            ])
+Ry = lambda phi: np.array([[np.cos(phi), 0, np.sin(phi)],
+                           [0,1,0],
+                           [-1*np.sin(phi), 0, np.cos(phi)]
+                          ])
+Rz = lambda psi: np.array([[np.cos(psi), -1*np.sin(psi),0],
+                           [np.sin(psi),np.cos(psi),0],
+                           [0,0,1]
+                          ])
+
 # ref: https://github.com/NVlabs/instant-ngp/blob/b76004c8cf478880227401ae763be4c02f80b62f/include/neural-graphics-primitives/nerf_loader.h#L50
 def nerf_matrix_to_ngp(pose, scale=0.33, offset=[0, 0, 0]):
     # for the fox dataset, 0.33 scales camera radius to ~ 2
@@ -140,6 +153,7 @@ class NeRFTouchDataset:
             # load all splits (train/valid/test), this is what instant-ngp in fact does...
             if type == 'all':
                 transform_paths = glob.glob(os.path.join(self.root_path, '*.json'))
+                print(transform_paths)
                 transform = None
                 for transform_path in transform_paths:
                     with open(transform_path, 'r') as f:
@@ -228,15 +242,24 @@ class NeRFTouchDataset:
             self.W = []
 
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path']+'.png')
-                #print(f_path)
+                f_path = os.path.join(self.root_path, f['file_path'])
+                print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
 
                 # there are non-exist paths in fox...
                 if not os.path.exists(f_path):
+                    print("UH OH")
                     continue
                 
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                T = np.eye(4)
+                T[:3,:3] = Ry(np.pi/2)
+                pose = T@pose
+                pose = np.linalg.inv(pose)
+                T = np.eye(4)
+                T[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
+                pose = T@pose
+                pose = np.linalg.inv(pose)
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]

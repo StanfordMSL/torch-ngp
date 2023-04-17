@@ -276,14 +276,13 @@ class NeRFRenderer(nn.Module):
             #print("ENTERED BOUNDED RAY MATCH")
             depth = torch.sum(weights * z_vals, dim=-1)
             depth = depth + (1-weights_sum)*max_far
-            d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-z_vals), dim=-1)
+            d_var = torch.sum(torch.square(z_vals - depth.reshape(-1,1)), dim=-1)/(z_vals.shape[-1]-1)
         else:
             #print("ENTERED UNBOUNDED RAY MATH")
             ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
             depth = torch.sum(weights * ori_z_vals, dim=-1)
-            d_var = torch.sum(weights*torch.square(depth.reshape(-1,1)-ori_z_vals), dim=-1) + 1e-5
+            d_var = torch.sum(torch.square(ori_z_vals - depth.reshape(-1,1)), dim=-1)/(ori_z_vals.shape[-1]-1)
         
-
         # calculate color
         image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
 
@@ -307,6 +306,7 @@ class NeRFRenderer(nn.Module):
 
         return {
             'depth': depth,
+            'depth_var': d_var,
             'image': image,
             'weights_sum': weights_sum,
         }

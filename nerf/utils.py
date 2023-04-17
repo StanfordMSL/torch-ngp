@@ -32,6 +32,7 @@ from packaging import version as pver
 from itertools import cycle
 import json
 
+
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -884,16 +885,41 @@ class Trainer(object):
         elif data['type'] == 'depth':
             gt_rgb = torch.squeeze(gt_rgb,axis=-1)
             #print(gt_rgb.shape)
+            valid_ind = gt_rgb>data['near']
             pred_depth = outputs['depth']
+            #var = torch.sum(torch.square(pred_depth[valid_ind] - torch.mean(pred_depth[valid_ind])))/(pred_depth[valid_ind].shape[-1]-1)
+            #print("VAR")
+            #print(var)
             # print("CHECKING NETWORK RESULT")
             # print(gt_rgb)
             # print(" ")
             # print(pred_depth)
             l2 = torch.nn.MSELoss()
             l1 = torch.nn.L1Loss()
+            loss = l1(gt_rgb[valid_ind], pred_depth[valid_ind])
             #var = torch.mean(torch.abs(pred_depth-gt_rgb)/(torch.sqrt(outputs['depth_var']+1e-12)))
-            depth_loss = l1(pred_depth,gt_rgb) #+ torch.log(1+torch.square(pred_depth-gt_rgb)/gt_rgb).mean()  #+ var + torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
-            loss = depth_loss
+            #loss = torch.mean(torch.abs(gt_rgb[valid_ind] - pred_depth[valid_ind])/torch.sqrt(var))
+            #print("GT")
+            #print(data['near'])
+            #print(gt_rgb.shape)
+            #print(torch.max(gt_rgb))
+            #print(torch.min(gt_rgb))
+            #print(torch.max(gt_rgb[gt_rgb>data['near']]))
+            #print(torch.min(gt_rgb[gt_rgb>data['near']]))
+            #print("predicted")
+            #print(torch.max(pred_depth[gt_rgb>data['near']]))
+            #print(torch.min(pred_depth[gt_rgb>data['near']]))
+            #stop
+            #pred_depth = pred_depth[gt_rgb>data['near']] 
+            #print("data check")
+            #print(torch.min(gt_rgb))
+            #print(torch.max(gt_rgb))
+            #print(data['near'])
+            #print(data['far'])
+            #print(" ")
+            #gt_rgb = gt_rgb[gt_rgb>data['near']]
+            #depth_loss = l1(pred_depth,gt_rgb) #+ torch.log(1+torch.square(pred_depth-gt_rgb)/gt_rgb).mean()  #+ var + torch.max(torch.abs(pred_depth-gt_rgb),dim=-1)[0].mean()
+            #loss = depth_loss
 
             pred_rgb = outputs['image']
 
@@ -904,6 +930,7 @@ class Trainer(object):
             l1 = torch.nn.L1Loss()
             #print("vals")
             #print(pred_depth[gt_rgb<self.opt.touch_far].shape)
+            
             touch_loss = l1(pred_depth,gt_rgb)
             #print("CHECK VALUES")
             #print(touch_loss)

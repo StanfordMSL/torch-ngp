@@ -50,7 +50,7 @@ def visualize_poses(poses, size=0.1):
     box.colors = np.array([[128, 128, 128]] * len(box.entities))
     objects = [axes, box]
     
-    inds = np.random.choice(np.arange(poses.shape[0]), size=2, replace=False)
+    inds = np.random.choice(np.arange(poses.shape[0]), size=4, replace=False)
     poses = poses[inds,...]
     #print(poses.shape)
 
@@ -225,7 +225,7 @@ class NeRFDataset:
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 #print("color")
-                #print(f_path)
+                print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
                 if self.mode == 'blender' and '.' not in os.path.basename(f_path):
                     f_path += '.png' # so silly...
@@ -240,14 +240,34 @@ class NeRFDataset:
                 #print(pose)
                 #pose = np.linalg.inv(pose)
                 T = np.eye(4)
+                T[:3,:3] = Ry(np.pi/2)
+                #Ta = np.eye(4)
+                #Ta[:,3] = [0.09685, 0, -0.05518739, 1]
+                #Tb = np.array([[0.701511, -0.71218, -0.026116, 0.0701215],
+                #               [0.712492,0.701668, 0.00408673, -0.0705436],
+                #               [0.0154143,-0.0214744, 0.999651, 0.0522792],
+                #               [0,0,0,1]])
+                #T = T@Tb@np.linalg.inv(Ta)
+                pose = T@pose
+                pose = np.linalg.inv(pose)
+                #Ta = np.eye(4)
+                #Ta[:,3] = [0.09685, 0, -0.05518739, 1]
+                #Tb = np.array([[0.701511, -0.71218, -0.026116, 0.0701215],
+                #               [0.712492,0.701668, 0.00408673, -0.0705436],
+                #               [0.0154143,-0.0214744, 0.999651, 0.0522792],
+                #               [0,0,0,1]])
+                #T = T@Tb@np.linalg.inv(Ta)
+                #pose = T@pose
+                T = np.eye(4)
                 T[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
-                pose = T.T@pose@T
+                pose = T@pose
+                pose = np.linalg.inv(pose)
                 #pose[1,:] = -1*pose[1,:]
                 #pose = pose[[1,0,2,3],:]
                 #print(pose)
                 #stop
                 #pose = np.linalg.inv(pose)
-                pose = np.linalg.inv(pose)
+                #pose = np.linalg.inv(pose)
                 #pose[:3,:3] =  Rx(np.pi)@Rz(-np.pi/2)@pose[:3,:3]
                 #pose = np.linalg.inv(pose)
                 self.val_poses.append(pose)
