@@ -50,8 +50,8 @@ def visualize_poses(poses, size=0.1):
     box.colors = np.array([[128, 128, 128]] * len(box.entities))
     objects = [axes, box]
     
-    inds = np.random.choice(np.arange(poses.shape[0]), size=4, replace=False)
-    poses = poses[inds,...]
+    #inds = np.random.choice(np.arange(poses.shape[0]), size=4, replace=False)
+    #poses = poses[inds,...]
     #print(poses.shape)
 
     for pose in poses:
@@ -222,6 +222,7 @@ class NeRFDataset:
             self.far = []
             self.H = []
             self.W = []
+            m2mm = 1000
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 #print("color")
@@ -259,9 +260,11 @@ class NeRFDataset:
                 #T = T@Tb@np.linalg.inv(Ta)
                 #pose = T@pose
                 T = np.eye(4)
-                T[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
+                T[:3,:3] = Rx(np.pi)#Rz(np.pi/2)@Rx(np.pi)
                 pose = T@pose
                 pose = np.linalg.inv(pose)
+                pose[:3,3] = m2mm*pose[:3,3]
+                
                 #pose[1,:] = -1*pose[1,:]
                 #pose = pose[[1,0,2,3],:]
                 #print(pose)
@@ -280,14 +283,14 @@ class NeRFDataset:
                     
                     # check if near plane for specified camera was provided. If not use default value close to zero
                     if "near" in transform["cameras"][f['camera']]:
-                        self.near.append(float(transform["cameras"][f['camera']]["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["near"]))
                     else:
                         self.near.append(-1*np.inf)
                     
                     # check if far plane for specified camera was provided. If not use large default value
                     if "far" in transform["cameras"][f['camera']]:
                         
-                        self.far.append(float(transform["cameras"][f['camera']]["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["far"]))
                     else:
                         self.far.append(np.inf)
                     
@@ -304,13 +307,13 @@ class NeRFDataset:
 
                     # check if near plane was provided. If not use default value close to zero
                     if "near" in transform:
-                        self.near.append(float(transform["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["near"]))
                     else:
                         self.near.append(-1*np.inf)
 
                     # check if far plane was provided. If not use large default value
                     if "far" in transform:
-                        self.far.append(float(transform["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["far"]))
                     else:
                         self.far.append(np.inf)
 
@@ -467,6 +470,8 @@ class NeRFDataset:
     
             self.intrinsics = np.tile(np.array([fl_x, fl_y, cx, cy, sensor_size]),(self.images.size[0],1))
 
+        print("poses")
+        print(self.poses[:,:,-1])
         print("intrinics")
         print("W: ", self.W.shape)
         print("H: ", self.H.shape)

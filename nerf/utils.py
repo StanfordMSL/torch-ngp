@@ -238,6 +238,29 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhol
 
     return results
 
+@torch.cuda.amp.autocast(enabled=False)
+def get_patch(poses, intrinsics, H, W, patch_size=1, num_patches=1, camera_model='pinhole'):
+    
+    max_dim = np.minimumm(H,W)
+    if patch_size>max_dim: # requested patch size is larger then entire image, use every pixel!
+        inds = torch.arange(H*W, device=device).expand([B, H*W])
+    else:
+
+        # randomly select a top left corner to extend patch from
+        corner_x = torch.randint(0, W, size=[num_patches], device=device) # may duplicate
+        corner_y = torch.randint(0, H, size=[num_patches], device=device) # may duplicate
+        
+        #check if corner is at the bottom
+        corner_x = torch.where(corner_x <= W-patch_size, corner_x, W-patch_size)
+        corner_y = torch.where(corner_y <= H-patch_size, corner_y, H-patch_size)
+        
+        x = torch.arange(patch_size, device=device)
+        y = torch.arange(patch_size, device=device)
+        X, Y = custom_meshgrid(x,y) # float
+        
+        patch_x_inds = corner_x + X
+        patch_y_inds = corner_y + Y
+    pass
 #@torch.cuda.amp.autocast(enabled=False)
 #def get_rays(poses, intrinsics, H, W, N=-1, error_map=None, camera_model='pinhole', MAX_TOUCH_ANGLE = 72.5):
 #    ''' get rays

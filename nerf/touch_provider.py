@@ -49,6 +49,9 @@ def visualize_poses(poses, size=0.1):
     box.colors = np.array([[128, 128, 128]] * len(box.entities))
     objects = [axes, box]
 
+    inds = np.random.choice(np.arange(poses.shape[0]), size=4, replace=False)
+    poses = poses[inds,...]
+
     for pose in poses:
         # a camera is visualized with 8 line segments.
         pos = pose[:3, 3]
@@ -64,6 +67,7 @@ def visualize_poses(poses, size=0.1):
         segs = np.array([[pos, a], [pos, b], [pos, c], [pos, d], [a, b], [b, c], [c, d], [d, a], [pos, o]])
         segs = trimesh.load_path(segs)
         objects.append(segs)
+        objects.append(trimesh.creation.axis(axis_length=.5, transform=pose))
     
     # sphere = trimesh.primitives.Sphere(radius=1, center=(0,0,0))
     # objects.append(sphere)
@@ -240,9 +244,9 @@ class NeRFTouchDataset:
             self.far = []
             self.H = []
             self.W = []
-
+            m2mm = 1000
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path'])
+                f_path = os.path.join(self.root_path, '.', f['file_path'])
                 print(f_path)
                 #f_path = os.path.join('.',f['file_path'])
 
@@ -252,14 +256,15 @@ class NeRFTouchDataset:
                     continue
                 
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
-                T = np.eye(4)
-                T[:3,:3] = Ry(np.pi/2)
-                pose = T@pose
-                pose = np.linalg.inv(pose)
-                T = np.eye(4)
-                T[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
-                pose = T@pose
-                pose = np.linalg.inv(pose)
+                #T = np.eye(4)
+                #T[:3,:3] = Ry(np.pi/2)
+                #pose = T@pose
+                #pose = np.linalg.inv(pose)
+                #T = np.eye(4)
+                #T[:3,:3] = Rz(-1*np.pi/2)@Rx(np.pi)
+                #pose = T@pose
+                #pose = np.linalg.inv(pose)
+                pose[:3,3] = m2mm*pose[:3,3]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
@@ -269,15 +274,15 @@ class NeRFTouchDataset:
 
                     # check if near plane for specified camera was provided. If not use default value close to zero
                     if "near" in transform["cameras"][f['camera']]:
-                        self.near.append(float(transform["cameras"][f['camera']]["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["near"]))
                     else:
-                        self.near.append(1e-6)
+                        self.near.append(-1*np.inf)
 
                     # check if far plane for specified camera was provided. If not use large default value
                     if "far" in transform["cameras"][f['camera']]:
-                        self.far.append(float(transform["cameras"][f['camera']]["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["far"]))
                     else:
-                        self.far.append(1.e9)
+                        self.far.append(np.inf)
 
 
                     # check if image dimensions were provided for specified camera. if not use image dimensions
@@ -293,15 +298,15 @@ class NeRFTouchDataset:
 
                     # check if near plane was provided. If not use default value close to zero
                     if "near" in transform:
-                        self.near.append(float(transform["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["near"]))
                     else:
-                        self.near.append(1e-6)
+                        self.near.append(-1*np.inf)
 
                     # check if far plane was provided. If not use large default value
                     if "far" in transform:
-                        self.far.append(float(transform["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["far"]))
                     else:
-                        self.far.append(1.e9)
+                        self.far.append(np.scale)
 
                     # check if image dimensions was provided for camera if not use image parameters
                     if "H" in transform and "W" in transform:
@@ -342,7 +347,7 @@ class NeRFTouchDataset:
             self.error_map = None
 
         # [debug] uncomment to view all training poses.
-        #visualize_poses(self.poses.numpy())
+        visualize_poses(self.poses.numpy())
 
         # [debug] uncomment to view examples of randomly generated poses.
         #visualize_poses(rand_poses(100, self.device, radius=self.radius).cpu().numpy())

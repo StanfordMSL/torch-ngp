@@ -150,13 +150,18 @@ class NeRFRenderer(nn.Module):
         #print(torch.min(fars))
         #print(torch.max(nears))
         #print(torch.min(nears))
-        fars = torch.min(fars, torch.tensor(max_far).to(device=device))
-        nears = torch.max(nears, torch.tensor(min_near).to(device=device))
-        #print(torch.max(fars))
-        #print(torch.min(fars))
-        #print(torch.max(nears))
-        #print(torch.min(nears))
-
+        fars = torch.max(torch.min(fars, torch.tensor(max_far).to(device=device)), torch.tensor(min_near).to(device=device))
+        nears = torch.min(torch.max(nears, torch.tensor(min_near).to(device=device)),torch.tensor(max_far).to(device=device))
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("max far and near")
+        #    print(torch.tensor(max_far))
+        #    print(torch.tensor(min_near))
+        #    print("chosen far and near")
+        #    print(torch.max(fars))
+        #    print(torch.min(fars))
+        #    print(torch.max(nears))
+        #    print(torch.min(nears))
+        
         nears.unsqueeze_(-1)
         fars.unsqueeze_(-1)
         #print(" ")
@@ -167,7 +172,13 @@ class NeRFRenderer(nn.Module):
         z_vals = z_vals.expand((N, num_steps)) # [N, T]
         z_vals = nears + (fars - nears) * z_vals # [N, T], in [nears, fars]
 
-        #print("Z VALS")
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("Z VALS")
+        #    print(nears)
+        #    print(fars)
+        #    print(torch.all(fars>nears))
+        #    print(torch.linspace(0.0, 1.0, num_steps, device=device).unsqueeze(0))
+        #    print(z_vals)
         #print(torch.max(z_vals))
         #print(torch.min(z_vals))
         #print(" ")
@@ -195,8 +206,13 @@ class NeRFRenderer(nn.Module):
             #points[:,-1] = z_vals
             stop
         '''
+
         # perturb z_vals
         sample_dist = (fars - nears) / num_steps
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("sample dist")
+        #    print(sample_dist)
+        #    print(torch.any(torch.isnan(sample_dist)))
         if perturb:
             z_vals = z_vals + (torch.rand(z_vals.shape, device=device) - 0.5) * sample_dist
             #z_vals = z_vals.clamp(nears, fars) # avoid out of bounds xyzs.
@@ -204,11 +220,19 @@ class NeRFRenderer(nn.Module):
         # generate xyzs
         xyzs = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1) # [N, 1, 3] * [N, T, 1] -> [N, T, 3]
         xyzs = torch.min(torch.max(xyzs, aabb[:3]), aabb[3:]) # a manual clip.
+        
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("xyzs")
+        #    print(torch.any(torch.isnan(xyzs)))
 
         #plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
 
         # query SDF and RGB
         density_outputs = self.density(xyzs.reshape(-1, 3))
+        
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("density")
+        #    print(density_outputs)
 
         #sigmas = density_outputs['sigma'].view(N, num_steps) # [N, T]
         for k, v in density_outputs.items():
@@ -255,6 +279,15 @@ class NeRFRenderer(nn.Module):
         alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+t+1]
         weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T+t]
 
+        #if datatype == 'rgb' or datatype == 'depth':
+        #    print("deltas")
+        #    print(torch.all(torch.isfinite(deltas)))
+        #    print(torch.any(deltas<0))
+        #    print("alphas")
+        #    print(torch.all(torch.isfinite(alphas)))
+        #    print("weights")
+        #    print(torch.all(torch.isfinite(weights)))
+
         dirs = rays_d.view(-1, 1, 3).expand_as(xyzs)
         for k, v in density_outputs.items():
             density_outputs[k] = v.view(-1, v.shape[-1])
@@ -274,6 +307,14 @@ class NeRFRenderer(nn.Module):
         
         if max_far is not np.inf or min_near is not np.inf:
             #print("ENTERED BOUNDED RAY MATCH")
+            #print("weights")
+            #print(torch.all(torch.isfinite(weights)))
+            #print("z vals")
+            #print(torch.all(torch.isfinite(z_vals)))
+            #print("max far")
+            #print(max_far)
+            #print("depth")
+            #print(torch.all(torch.isfinite(torch.sum(weights * z_vals, dim=-1))))
             depth = torch.sum(weights * z_vals, dim=-1)
             depth = depth + (1-weights_sum)*max_far
             d_var = torch.sum(torch.square(z_vals - depth.reshape(-1,1)), dim=-1)/(z_vals.shape[-1]-1)
@@ -303,7 +344,38 @@ class NeRFRenderer(nn.Module):
         # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
         # mid_zs = (z_vals + z_vals_shifted) / 2 # [N, T]
         # loss_dist = (torch.abs(mid_zs.unsqueeze(1) - mid_zs.unsqueeze(2)) * (weights.unsqueeze(1) * weights.unsqueeze(2))).sum() + 1/3 * ((z_vals_shifted - z_vals_shifted) * (weights ** 2)).sum()
-
+        if datatype == 'rgb' or datatype == 'depth':
+            if torch.any(torch.isnan(depth)):
+                print('z vals')
+                print(z_vals)
+                print('depth')
+                print(depth)
+                print('image')
+                print(image)
+            
+                fig = plt.figure()
+                ax = fig.add_subplot(projection='3d')
+                print(rays_o.shape)
+                print(rays_d.shape)
+                print(z_vals.shape)
+                rays_o = rays_o.reshape(-1,1,3).repeat(1,z_vals.shape[-1],1) 
+                rays_d = rays_d.reshape(-1,1,3).repeat(1,z_vals.shape[-1],1)
+                points = rays_o + z_vals.reshape(z_vals.shape[0],z_vals.shape[1], 1)*rays_d
+                print(points.shape)
+                points = points.reshape(-1,3).detach().cpu().numpy()
+                inds = np.random.choice(np.arange(points.shape[0]), size=100000, replace=False)
+                points = points[inds,:]
+                print(points.shape)
+                sc = ax.scatter(points[:,0],points[:,1],points[:,2])
+                ax.set_xlabel('X Label')
+                ax.set_ylabel('Y Label')
+                ax.set_zlabel('Z Label')
+                plt.show()
+                stop
+        
+        #print(depth)
+        #print(image)
+       
         return {
             'depth': depth,
             'depth_var': d_var,

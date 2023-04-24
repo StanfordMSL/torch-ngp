@@ -219,6 +219,7 @@ class NeRFDepthDataset:
             self.far = []
             self.H = []
             self.W = []
+            m2mm = 1000
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 #print(f_path)
@@ -238,10 +239,11 @@ class NeRFDepthDataset:
                 pose = np.linalg.inv(pose)
                 Ta = np.eye(4)
                 #Tb = np.eye(4)
-                Ta[:3,:3] = Rz(np.pi/2)@Rx(np.pi)
+                Ta[:3,:3] = Rx(np.pi)
                 #Tb[:3,:3] = Ry(np.pi)
                 pose = Ta@pose
                 pose = np.linalg.inv(pose)
+                pose[:3,3] = m2mm*pose[:3,3]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
@@ -251,15 +253,15 @@ class NeRFDepthDataset:
                     
                     # check if near plane for specified camera was provided. If not use default value close to zero
                     if "near" in transform["cameras"][f['camera']]:
-                        self.near.append(float(transform["cameras"][f['camera']]["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["near"]))
                     else:
-                        self.near.append(1e-6)
+                        self.near.append(-1*np.inf)
 
                     # check if far plane for specified camera was provided. If not use large default value
                     if "far" in transform["cameras"][f['camera']]:
-                        self.far.append(float(transform["cameras"][f['camera']]["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["cameras"][f['camera']]["far"]))
                     else:
-                        self.far.append(1.e9)
+                        self.far.append(np.inf)
 
                     
                     # check if image dimensions were provided for specified camera. if not use image dimensions
@@ -275,15 +277,15 @@ class NeRFDepthDataset:
 
                     # check if near plane was provided. If not use default value close to zero
                     if "near" in transform:
-                        self.near.append(float(transform["near"]))
+                        self.near.append(self.scale*m2mm*float(transform["near"]))
                     else:
-                        self.near.append(1e-6)
+                        self.near.append(-1*np.inf)
 
                     # check if far plane was provided. If not use large default value
                     if "far" in transform:
-                        self.far.append(float(transform["far"]))
+                        self.far.append(self.scale*m2mm*float(transform["far"]))
                     else:
-                        self.far.append(1.e9)
+                        self.far.append(np.inf)
 
                     # check if image dimensions was provided for camera if not use image parameters
                     if "H" in transform and "W" in transform:
